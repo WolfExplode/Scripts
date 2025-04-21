@@ -1,32 +1,31 @@
 import os
 import glob
 import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 
 AUDIO_EXTS = ('.mp3', '.m4a', '.aac', '.flac', '.wav')
 IMAGE_EXTS = ('.jpg', '.jpeg', '.png')
+MAX_WORKERS = 4  # Adjust based on your CPU cores
 
 def find_matching_image(audio_file):
-    """Find image file matching the audio file with debug info"""
+    """Find image file matching the audio file"""
     base_name = os.path.splitext(audio_file)[0]
-    print(f"\nProcessing audio: {audio_file}")
-    print(f"Base name: {base_name}")
+    escaped_base = glob.escape(base_name)
     
-    # Look for exact match first
+    # Exact match
     for ext in IMAGE_EXTS:
-        exact_match = f"{base_name}{ext}"
+        exact_match = f"{escaped_base}{ext}"
         if os.path.exists(exact_match):
-            print(f"Found exact match: {exact_match}")
             return exact_match
     
-    # Look for partial matches
+    # Partial match
     for ext in IMAGE_EXTS:
-        pattern = f"{base_name}*{ext}"
+        pattern = f"{escaped_base}*{ext}"
         matches = glob.glob(pattern)
         if matches:
-            print(f"Found partial match: {matches[0]}")
             return matches[0]
     
-    print("No matching image found")
     return None
 
 def add_album_art(audio_file, image_file):
@@ -97,16 +96,36 @@ def add_album_art(audio_file, image_file):
         return False
 
 def main():
-    """Process all audio files in current directory"""
-    for audio_file in glob.glob("*.*"):
-        if audio_file.lower().endswith(AUDIO_EXTS):
-            print("\n" + "="*50)
-            print(f"Processing file: {audio_file}")
-            image_file = find_matching_image(audio_file)
-            if not image_file:
-                print(f"[SKIP] No image found for {audio_file}")
-                continue
-            add_album_art(audio_file, image_file)
+    """Process all audio files in current directory with parallel execution"""
+    audio_files = glob.glob("*.*")
+    audio_files = [f for f in audio_files if f.lower().endswith(AUDIO_EXTS)]
+    
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        future_to_file = {}
+        for audio_file in audio_files:
+            future = executor.submit(process_file, audio_file)
+            future_to_file[future] = audio_file
+        
+        for future in as_completed(future_to_file):
+            audio_file = future_to_file[future]
+            try:
+                success = future.result()
+                if success:
+                    print(f"✅ Completed: {audio_file}")
+                else:
+                    print(f"❌ Failed: {audio_file}")
+            except Exception as e:
+                print(f"🔥 Error: {audio_file} - {str(e)}")
+
+def process_file(audio_file):
+    """Wrapper function to handle individual file processing"""
+    print("\n" + "="*50)
+    print(f"Processing file: {audio_file}")
+    image_file = find_matching_image(audio_file)
+    if not image_file:
+        print(f"[SKIP] No image found for {audio_file}")
+        return False
+    return add_album_art(audio_file, image_file)
 
 if __name__ == "__main__":
     main()
