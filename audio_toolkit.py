@@ -194,7 +194,6 @@ def process_videos_in_directory(
     """
     status_messages = []
     processed_files = []
-    last_processed_file = None  # For audio preview
     
     # Validate directories
     if not input_directory or not os.path.exists(input_directory):
@@ -267,7 +266,6 @@ def process_videos_in_directory(
             
             status_messages.append(f"  ✅ Audio extracted to {os.path.basename(audio_path)}")
             processed_files.append(audio_path)
-            last_processed_file = audio_path  # Keep track of last file for preview
             
             # Handle album art
             if use_first_frame_as_cover:
@@ -326,7 +324,7 @@ def process_videos_in_directory(
     status_messages.append(f"🎉 Processing complete! {len(processed_files)} files processed successfully.")
     status_messages.append(f"📁 Output location: {output_directory}")
     
-    return "\n".join(status_messages), last_processed_file
+    return "\n".join(status_messages)
 
 
 # Define the Gradio interface
@@ -412,11 +410,6 @@ with gr.Blocks() as demo:
                 interactive=False,
                 max_lines=30
             )
-            output_audio = gr.Audio(
-                label="Last Extracted Audio (Preview)", 
-                type="filepath", 
-                interactive=False
-            )
 
     # Connect the UI components to the processing function
     process_button.click(
@@ -435,7 +428,6 @@ with gr.Blocks() as demo:
         ],
         outputs=[
             status_output,
-            output_audio,
         ]
     )
 
