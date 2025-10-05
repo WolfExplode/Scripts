@@ -4,6 +4,8 @@ import os
 import subprocess
 from pathlib import Path
 import shutil
+import json
+import concurrent.futures
 
 # Add mutagen for metadata tagging
 try:
@@ -102,7 +104,314 @@ def get_audio_codec(video_file):
         return "??"  # Indicate failure to get codec
 
 
-def extract_audio(video_file, output_dir, output_ext, overwrite=False, re_encode=False, target_format=None, quality=None):
+def ffprobe_audio_streams(input_path):
+    cmd = [
+        'ffprobe', '-v', 'error', '-show_streams', '-select_streams', 'a',
+        '-of', 'json', input_path
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        data = json.loads(result.stdout or '{}')
+        streams = data.get('streams', [])
+        return streams
+    except subprocess.CalledProcessError:
+        return []
+    except json.JSONDecodeError:
+        return []
+
+
+def scan_file_tracks_and_channels(input_path):
+    streams = ffprobe_audio_streams(input_path)
+    if not streams:
+        return "No audio streams found or failed to probe."
+    lines = []
+    lines.append(f"File: {os.path.basename(input_path)}")
+    lines.append(f"Audio tracks: {len(streams)}")
+    for i, s in enumerate(streams):
+        codec = s.get('codec_name', 'unknown')
+        channels = s.get('channels', 'unknown')
+        layout = s.get('channel_layout', 'unknown')
+        lang = s.get('tags', {}).get('language', '') if isinstance(s.get('tags'), dict) else ''
+        lang_str = f", lang={lang}" if lang else ""
+        lines.append(f"  - track a:{i}: codec={codec}, channels={channels}, layout={layout}{lang_str}")
+    return "\n".join(lines)
+
+
+def codec_to_extension(codec_name):
+    # Map common codecs to container extension suitable for stream copy
+    mapping = {
+        'aac': 'm4a',
+        'alac': 'm4a',
+        'flac': 'flac',
+        'mp3': 'mp3',
+        'opus': 'opus',
+        'vorbis': 'ogg',
+        'pcm_s16le': 'wav',
+        'pcm_s24le': 'wav',
+        'pcm_s32le': 'wav',
+        'ac3': 'ac3',
+        'eac3': 'eac3',
+    }
+    return mapping.get(codec_name, 'm4a')
+
+
+def extract_all_audio_streams(input_path, output_dir, overwrite=False, preserve_metadata=True):
+    streams = ffprobe_audio_streams(input_path)
+    if not streams:
+        return [], ["  ❌ No audio streams found"]
+    created = []
+    msgs = []
+    base = os.path.splitext(os.path.basename(input_path))[0]
+    for idx, s in enumerate(streams):
+        codec = s.get('codec_name', 'unknown')
+        ext = codec_to_extension(codec)
+        out_path = os.path.join(output_dir, f"{base}.a{idx}.{ext}")
+        if os.path.exists(out_path) and not overwrite:
+            msgs.append(f"  ⏭️ Skipped stream a:{idx} (exists)")
+            continue
+        cmd = ['ffmpeg', '-i', input_path, '-map', f'0:a:{idx}', '-c:a', 'copy']
+        if preserve_metadata:
+            cmd.extend(['-map_metadata', '0'])
+        cmd.append(out_path)
+        try:
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+            created.append(out_path)
+            msgs.append(f"  ✅ Extracted stream a:{idx} -> {os.path.basename(out_path)}")
+        except subprocess.CalledProcessError:
+            msgs.append(f"  ❌ Failed extracting stream a:{idx}")
+    return created, msgs
+
+
+def extract_all_audio_streams_best_effort(input_path, output_dir, overwrite=False, preserve_metadata=True, max_workers=0):
+    """Extract each audio stream concurrently. Copy first; if copy fails, re-encode that stream and report."""
+    streams = ffprobe_audio_streams(input_path)
+    if not streams:
+        return [], ["  ❌ No audio streams found"]
+    base = os.path.splitext(os.path.basename(input_path))[0]
+
+    def make_worker(idx, codec):
+        ext = codec_to_extension(codec)
+        out_copy = os.path.join(output_dir, f"{base}.a{idx}.{ext}")
+        def worker():
+            if os.path.exists(out_copy) and not overwrite:
+                return None, f"  ⏭️ Skipped stream a:{idx} (exists)"
+            cmd = ['ffmpeg', '-i', input_path, '-map', f'0:a:{idx}', '-c:a', 'copy']
+            if preserve_metadata:
+                cmd.extend(['-map_metadata', '0'])
+            cmd.append(out_copy)
+            try:
+                subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+                return out_copy, f"  ✅ Extracted stream a:{idx} via copy -> {os.path.basename(out_copy)}"
+            except subprocess.CalledProcessError:
+                pass
+            # Re-encode fallback per stream
+            enc_map = {
+                'aac': ('aac', 'm4a'),
+                'mp3': ('libmp3lame', 'mp3'),
+                'flac': ('flac', 'flac'),
+                'opus': ('libopus', 'opus'),
+            }
+            encoder, ext2 = enc_map.get(codec, ('aac', 'm4a'))
+            out_enc = os.path.join(output_dir, f"{base}.a{idx}.{ext2}")
+            cmd = ['ffmpeg', '-i', input_path, '-map', f'0:a:{idx}', '-c:a', encoder]
+            if encoder in ('aac', 'libmp3lame', 'libopus'):
+                cmd.extend(['-b:a', '192k'])
+            if preserve_metadata:
+                cmd.extend(['-map_metadata', '0'])
+            cmd.append(out_enc)
+            try:
+                subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+                return out_enc, f"  ⚠️ Stream a:{idx} re-encoded -> {os.path.basename(out_enc)}"
+            except subprocess.CalledProcessError:
+                return None, f"  ❌ Failed extracting stream a:{idx}"
+        return worker
+
+    tasks = []
+    for idx, s in enumerate(streams):
+        codec = s.get('codec_name', 'unknown')
+        tasks.append(make_worker(idx, codec))
+
+    created, msgs = [], []
+    try:
+        os.makedirs(output_dir, exist_ok=True)
+    except Exception as e:
+        return created, [f"  ❌ Cannot create output directory: {e}"]
+
+    workers = max(1, (os.cpu_count() or 4)) if not max_workers or max_workers <= 0 else max_workers
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [executor.submit(t) for t in tasks]
+        for fut in concurrent.futures.as_completed(futures):
+            out_path, message = fut.result()
+            if out_path:
+                created.append(out_path)
+            msgs.append(message)
+
+    return created, msgs
+
+
+def extract_all_audio_channels(input_path, output_dir, overwrite=False, preserve_metadata=True):
+    # Best-effort channel split via -map_channel without re-encoding
+    streams = ffprobe_audio_streams(input_path)
+    if not streams:
+        return [], ["  ❌ No audio streams found"]
+    created = []
+    msgs = []
+    base = os.path.splitext(os.path.basename(input_path))[0]
+    for s_idx, s in enumerate(streams):
+        codec = s.get('codec_name', 'unknown')
+        channels = s.get('channels', 0) or 0
+        ext = codec_to_extension(codec)
+        # Only attempt per-channel stream copy for raw PCM; most compressed codecs cannot change channel count without re-encoding
+        pcm_codecs = {
+            'pcm_s8', 'pcm_u8', 'pcm_s16le', 'pcm_s16be', 'pcm_s24le', 'pcm_s24be', 'pcm_s32le', 'pcm_s32be',
+            'pcm_f32le', 'pcm_f32be', 'pcm_f64le', 'pcm_f64be'
+        }
+        if codec not in pcm_codecs:
+            msgs.append(
+                f"  ⚠️ Skipping per-channel split for a:{s_idx} (codec={codec}) — not possible without re-encoding"
+            )
+            # Suggest extracting entire stream instead
+            continue
+        if not channels or channels == 1:
+            # Single-channel: just copy the stream
+            out_path = os.path.join(output_dir, f"{base}.a{s_idx}.ch0.{ext}")
+            if os.path.exists(out_path) and not overwrite:
+                msgs.append(f"  ⏭️ Skipped channel a:{s_idx}:0 (exists)")
+                continue
+            cmd = ['ffmpeg', '-i', input_path, '-map', f'0:a:{s_idx}', '-c:a', 'copy']
+            if preserve_metadata:
+                cmd.extend(['-map_metadata', '0'])
+            cmd.append(out_path)
+            try:
+                subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+                created.append(out_path)
+                msgs.append(f"  ✅ Extracted channel a:{s_idx}:0 -> {os.path.basename(out_path)}")
+            except subprocess.CalledProcessError:
+                msgs.append(f"  ❌ Failed extracting channel a:{s_idx}:0")
+            continue
+        # Multi-channel: attempt per-channel copy using -map_channel (may fail for some codecs)
+        for ch in range(int(channels)):
+            out_path = os.path.join(output_dir, f"{base}.a{s_idx}.ch{ch}.{ext}")
+            if os.path.exists(out_path) and not overwrite:
+                msgs.append(f"  ⏭️ Skipped channel a:{s_idx}:{ch} (exists)")
+                continue
+            cmd = ['ffmpeg', '-i', input_path, '-map_channel', f'0.0.{ch}', '-c:a', 'copy']
+            # Note: 0.0.ch uses first input file, first audio program; for container-index stability we also try stream-qualified form
+            # Prefer stream-qualified mapping if supported by ffmpeg version
+            # Fallback is the generic 0.0.ch which maps channel index within the first audio stream
+            try:
+                subprocess.run(cmd + [out_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+                created.append(out_path)
+                msgs.append(f"  ✅ Extracted channel a:{s_idx}:{ch} -> {os.path.basename(out_path)}")
+            except subprocess.CalledProcessError:
+                # Attempt stream-qualified mapping if available: 0:a:s_idx.c:ch
+                alt_cmd = ['ffmpeg', '-i', input_path, '-map_channel', f'0:a:{s_idx}.{ch}', '-c:a', 'copy', out_path]
+                try:
+                    subprocess.run(alt_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+                    created.append(out_path)
+                    msgs.append(f"  ✅ Extracted channel a:{s_idx}:{ch} -> {os.path.basename(out_path)}")
+                except subprocess.CalledProcessError:
+                    msgs.append(f"  ❌ Failed extracting channel a:{s_idx}:{ch} (codec={codec})")
+    return created, msgs
+
+
+def split_channels_best_effort(input_path, output_dir, overwrite=False, preserve_metadata=True, max_workers=0):
+    """Split channels per track concurrently.
+
+    - For PCM codecs, attempt channel copy with -map_channel. If that fails, try stream-qualified mapping.
+    - For compressed codecs, re-encode per channel using pan filter.
+    """
+    streams = ffprobe_audio_streams(input_path)
+    if not streams:
+        return [], ["  ❌ No audio streams found"]
+    base = os.path.splitext(os.path.basename(input_path))[0]
+    pcm_codecs = {
+        'pcm_s8', 'pcm_u8', 'pcm_s16le', 'pcm_s16be', 'pcm_s24le', 'pcm_s24be', 'pcm_s32le', 'pcm_s32be',
+        'pcm_f32le', 'pcm_f32be', 'pcm_f64le', 'pcm_f64be'
+    }
+
+    tasks = []
+
+    def make_pcm_worker(s_idx, ch, ext):
+        out_path = os.path.join(output_dir, f"{base}.a{s_idx}.ch{ch}.{ext}")
+        def worker():
+            if os.path.exists(out_path) and not overwrite:
+                return None, f"  ⏭️ Skipped channel a:{s_idx}:{ch} (exists)"
+            # Try generic mapping
+            cmd = ['ffmpeg', '-i', input_path, '-map_channel', f'0.0.{ch}', '-c:a', 'copy']
+            if preserve_metadata:
+                cmd.extend(['-map_metadata', '0'])
+            cmd.append(out_path)
+            try:
+                subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+                return out_path, f"  ✅ Extracted channel a:{s_idx}:{ch} -> {os.path.basename(out_path)}"
+            except subprocess.CalledProcessError:
+                # Fallback: stream-qualified mapping
+                alt_cmd = ['ffmpeg', '-i', input_path, '-map_channel', f'0:a:{s_idx}.{ch}', '-c:a', 'copy']
+                if preserve_metadata:
+                    alt_cmd.extend(['-map_metadata', '0'])
+                alt_cmd.append(out_path)
+                try:
+                    subprocess.run(alt_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+                    return out_path, f"  ✅ Extracted channel a:{s_idx}:{ch} -> {os.path.basename(out_path)}"
+                except subprocess.CalledProcessError:
+                    return None, f"  ❌ Failed extracting channel a:{s_idx}:{ch} (PCM)"
+        return worker
+
+    def make_compressed_worker(s_idx, ch):
+        out_path = os.path.join(output_dir, f"{base}.a{s_idx}.ch{ch}.m4a")
+        def worker():
+            if os.path.exists(out_path) and not overwrite:
+                return None, f"  ⏭️ Skipped channel a:{s_idx}:{ch} (exists)"
+            pan = f"pan=mono|c0=c{ch}"
+            cmd = ['ffmpeg', '-i', input_path, '-map', f'0:a:{s_idx}', '-af', pan, '-c:a', 'aac', '-b:a', '160k']
+            if preserve_metadata:
+                cmd.extend(['-map_metadata', '0'])
+            cmd.append(out_path)
+            try:
+                subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+                return out_path, f"  ⚠️ Channel a:{s_idx}:{ch} re-encoded -> {os.path.basename(out_path)}"
+            except subprocess.CalledProcessError:
+                return None, f"  ❌ Failed splitting channel a:{s_idx}:{ch}"
+        return worker
+
+    # Build tasks for all streams/channels
+    for s_idx, s in enumerate(streams):
+        codec = s.get('codec_name', 'unknown')
+        channels = int(s.get('channels', 0) or 0)
+        if channels <= 0:
+            continue
+        if codec in pcm_codecs:
+            ext = codec_to_extension(codec)
+            for ch in range(channels):
+                tasks.append(make_pcm_worker(s_idx, ch, ext))
+        else:
+            for ch in range(channels):
+                tasks.append(make_compressed_worker(s_idx, ch))
+
+    created = []
+    msgs = []
+    if not tasks:
+        return created, ["  ❌ No channels to process"]
+
+    try:
+        os.makedirs(output_dir, exist_ok=True)
+    except Exception as e:
+        return created, [f"  ❌ Cannot create output directory: {e}"]
+
+    workers = max(1, (os.cpu_count() or 4)) if not max_workers or max_workers <= 0 else max_workers
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [executor.submit(t) for t in tasks]
+        for fut in concurrent.futures.as_completed(futures):
+            out_path, message = fut.result()
+            if out_path:
+                created.append(out_path)
+            msgs.append(message)
+
+    return created, msgs
+
+
+def extract_audio(video_file, output_dir, output_ext, overwrite=False, re_encode=False, target_format=None, quality=None, preserve_metadata=True):
     # Create output path in specified directory
     video_name = os.path.splitext(os.path.basename(video_file))[0]
     output_file = os.path.join(output_dir, f"{video_name}.{output_ext}")
@@ -129,10 +438,15 @@ def extract_audio(video_file, output_dir, output_ext, overwrite=False, re_encode
             # Default to AAC if unknown format
             cmd.extend(['-c:a', 'aac', '-b:a', quality or '192k'])
         
+        if preserve_metadata:
+            cmd.extend(['-map_metadata', '0'])
         cmd.append(output_file)
     else:
         # No re-encoding - just copy the audio stream
-        cmd = ['ffmpeg', '-i', video_file, '-vn', '-c:a', 'copy', output_file]
+        cmd = ['ffmpeg', '-i', video_file, '-vn', '-c:a', 'copy']
+        if preserve_metadata:
+            cmd.extend(['-map_metadata', '0'])
+        cmd.append(output_file)
     
     try:
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
@@ -140,6 +454,31 @@ def extract_audio(video_file, output_dir, output_ext, overwrite=False, re_encode
     except subprocess.CalledProcessError:
         return None  # Indicate failure
 
+
+def extract_audio_best_effort(input_path, output_dir, preserve_metadata=True):
+    """Try to extract main audio via stream copy; if it fails, re-encode and report.
+
+    Returns (path_or_None, messages:list[str])
+    """
+    msgs = []
+    codec = get_audio_codec(input_path)
+    ext_map = {"aac": "m4a", "mp3": "mp3", "flac": "flac", "opus": "opus", "pcm_s16le": "wav", "pcm_s24le": "wav", "pcm_s32le": "wav"}
+    target_ext = ext_map.get(codec, "m4a")
+    # Attempt copy first
+    copied = extract_audio(input_path, output_dir, target_ext, overwrite=True, re_encode=False, preserve_metadata=preserve_metadata)
+    if copied:
+        msgs.append("  ✅ Extracted via stream copy")
+        return copied, msgs
+    # Fallback: re-encode
+    msgs.append("  ⚠️ Stream copy failed; re-encoding audio")
+    # choose encoder
+    target_format = target_ext if target_ext in ["mp3", "aac", "flac", "opus", "wav"] else "aac"
+    reenc = extract_audio(input_path, output_dir, target_format, overwrite=True, re_encode=True, target_format=target_format, quality="192k", preserve_metadata=preserve_metadata)
+    if reenc:
+        msgs.append(f"  ✅ Re-encoded to {target_format} (192k)")
+        return reenc, msgs
+    msgs.append("  ❌ Failed to extract audio")
+    return None, msgs
 
 def extract_first_frame(video_file, output_dir):
     # Create output path in specified directory
@@ -187,7 +526,8 @@ def process_videos_in_directory(
         re_encode_audio: bool,
         target_audio_format: str,
         audio_quality: str,
-        external_cover_image_obj: gr.File = None
+        external_cover_image_obj: gr.File = None,
+        preserve_metadata: bool = True
 ):
     """
     Processes all video files in the specified input directory.
@@ -254,7 +594,8 @@ def process_videos_in_directory(
                 overwrite=overwrite_existing_files,
                 re_encode=re_encode_audio,
                 target_format=target_audio_format if re_encode_audio else None,
-                quality=audio_quality if re_encode_audio else None
+                quality=audio_quality if re_encode_audio else None,
+                preserve_metadata=preserve_metadata
             )
             
             if audio_path is None:
@@ -329,9 +670,7 @@ def process_videos_in_directory(
 
 # Define the Gradio interface
 with gr.Blocks() as demo:
-    gr.Markdown("# 🎬 Video Audio Extractor - Batch Processor")
-    gr.Markdown("Extract audio from video files and optionally embed album art.")
-    gr.Markdown(f"**Script directory:** {SCRIPT_DIR}")
+    gr.Markdown("# Audio Extractor")
 
     with gr.Row():
         with gr.Column():
@@ -340,14 +679,12 @@ with gr.Blocks() as demo:
                 label="Input Directory Path",
                 placeholder="Enter path to folder containing video files",
                 value=SCRIPT_DIR,
-                info="Directory containing video files to process"
             )
             
             output_dir_input = gr.Textbox(
-                label="Output Directory Path (optional)",
+                label="Output Directory Path (defaults to input directory)",
                 placeholder="Leave empty to use same as input directory",
-                value="",
-                info="Directory to save extracted audio files (defaults to input directory)"
+                value=""
             )
 
             with gr.Accordion("Audio Encoding Options", open=False):
@@ -360,7 +697,7 @@ with gr.Blocks() as demo:
                 target_format_dropdown = gr.Dropdown(
                     label="Target Audio Format",
                     choices=["mp3", "aac", "flac", "opus", "wav"],
-                    value="mp3",
+                    value="aac",
                     info="Format to convert audio to (when re-encoding)"
                 )
                 
@@ -369,6 +706,11 @@ with gr.Blocks() as demo:
                     choices=["64k", "96k", "128k", "160k", "192k", "256k", "320k"],
                     value="192k",
                     info="Bitrate for compressed formats (when re-encoding)"
+                )
+                preserve_metadata_checkbox = gr.Checkbox(
+                    label="Preserve original metadata (recommended)",
+                    value=True,
+                    info="Copy as much metadata as possible from the original video/audio."
                 )
 
             with gr.Accordion("Album Art Options", open=False):
@@ -403,6 +745,28 @@ with gr.Blocks() as demo:
 
             process_button = gr.Button("🚀 Start Batch Processing", variant="primary", size="lg")
 
+            with gr.Accordion("Unified Tools (file or folder)", open=False):
+                unified_input = gr.Textbox(
+                    label="Path",
+                    placeholder="Path to a media file OR a folder",
+                    value=SCRIPT_DIR,
+                )
+                scan_button = gr.Button("🔍 Scan Tracks & Channels")
+                scan_output = gr.Textbox(label="Scan Result", lines=8)
+
+                extract_outdir = gr.Textbox(
+                    label="Output Directory",
+                    placeholder="Leave empty to use same directory",
+                    value="",
+                )
+                extract_overwrite = gr.Checkbox(label="Overwrite existing files", value=False)
+                extract_preserve_meta = gr.Checkbox(label="Preserve original metadata", value=True)
+                max_parallel = gr.Slider(minimum=1, maximum=16, step=1, label="Max parallel jobs", value=6)
+                extract_main_button = gr.Button("🎵 Extract Main Audio (copy-first, auto re-encode)")
+                extract_streams_button = gr.Button("🎧 Extract All Audio Tracks (copy-first, auto re-encode)")
+                split_channels_button = gr.Button("🎚️ Split Channels (copy for PCM, re-encode otherwise)")
+                extract_output = gr.Textbox(label="Operation Log", lines=10)
+
         with gr.Column():
             status_output = gr.Textbox(
                 label="Processing Status", 
@@ -424,11 +788,88 @@ with gr.Blocks() as demo:
             re_encode_checkbox,
             target_format_dropdown,
             quality_dropdown,
-            external_cover_input
+            external_cover_input,
+            preserve_metadata_checkbox
         ],
         outputs=[
             status_output,
         ]
     )
+
+    # Wire single-file tools
+    def _normalize_path_and_iterate(path):
+        if not path or not os.path.exists(path):
+            return None, []
+        if os.path.isdir(path):
+            files = []
+            for ext in VIDEO_EXTS + AUDIO_EXTS:
+                files.extend(Path(path).glob(f"*{ext}"))
+            return None, [str(p) for p in files]
+        return path, [path]
+
+    def _scan(path):
+        single, files = _normalize_path_and_iterate(path)
+        if not files:
+            return "❌ Path not found or no media files"
+        reports = []
+        for f in files:
+            reports.append(scan_file_tracks_and_channels(f))
+        return "\n\n".join(reports)
+
+    def _extract_main(path, outdir, overwrite, preserve_meta):
+        single, files = _normalize_path_and_iterate(path)
+        if not files:
+            return "❌ Path not found or no media files"
+        log = []
+        for f in files:
+            od = outdir or os.path.dirname(f)
+            try:
+                os.makedirs(od, exist_ok=True)
+            except Exception as e:
+                log.append(f"📄 {os.path.basename(f)}\n❌ Cannot create output directory: {e}")
+                continue
+            out, msgs = extract_audio_best_effort(f, od, preserve_metadata=preserve_meta)
+            header = f"📄 {os.path.basename(f)}\n📁 Output: {od}\nResult: {'OK' if out else 'FAILED'}"
+            log.append("\n".join([header] + msgs))
+        return "\n\n".join(log)
+
+    def _extract_tracks(path, outdir, overwrite, preserve_meta, max_jobs):
+        single, files = _normalize_path_and_iterate(path)
+        if not files:
+            return "❌ Path not found or no media files"
+        log = []
+        for f in files:
+            od = outdir or os.path.dirname(f)
+            try:
+                os.makedirs(od, exist_ok=True)
+            except Exception as e:
+                log.append(f"📄 {os.path.basename(f)}\n❌ Cannot create output directory: {e}")
+                continue
+            created, msgs = extract_all_audio_streams_best_effort(f, od, overwrite=overwrite, preserve_metadata=preserve_meta, max_workers=int(max_jobs))
+            header = f"📄 {os.path.basename(f)}\n📁 Output: {od}\nCreated: {len(created)} file(s)"
+            log.append("\n".join([header] + msgs))
+        return "\n\n".join(log)
+
+    def _split_channels(path, outdir, overwrite, preserve_meta, max_jobs):
+        single, files = _normalize_path_and_iterate(path)
+        if not files:
+            return "❌ Path not found or no media files"
+        log = []
+        for f in files:
+            od = outdir or os.path.dirname(f)
+            try:
+                os.makedirs(od, exist_ok=True)
+            except Exception as e:
+                log.append(f"📄 {os.path.basename(f)}\n❌ Cannot create output directory: {e}")
+                continue
+            created, msgs = split_channels_best_effort(f, od, overwrite=overwrite, preserve_metadata=preserve_meta, max_workers=int(max_jobs))
+            header = f"📄 {os.path.basename(f)}\n📁 Output: {od}\nCreated: {len(created)} file(s)"
+            log.append("\n".join([header] + msgs))
+        return "\n\n".join(log)
+
+    scan_button.click(fn=_scan, inputs=[unified_input], outputs=[scan_output])
+    extract_main_button.click(fn=_extract_main, inputs=[unified_input, extract_outdir, extract_overwrite, extract_preserve_meta], outputs=[extract_output])
+    extract_streams_button.click(fn=_extract_tracks, inputs=[unified_input, extract_outdir, extract_overwrite, extract_preserve_meta, max_parallel], outputs=[extract_output])
+    split_channels_button.click(fn=_split_channels, inputs=[unified_input, extract_outdir, extract_overwrite, extract_preserve_meta, max_parallel], outputs=[extract_output])
 
 demo.launch()
