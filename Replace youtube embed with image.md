@@ -7,29 +7,30 @@ if(!ea.verifyMinimumPluginVersion || !ea.verifyMinimumPluginVersion("2.14.2")) {
 // -----------------------------------------------------
 // 1. Initialization and Data Structures
 // -----------------------------------------------------
-const selectedElements = ea.getViewSelectedElements();
+
+// Get all elements in the current drawing
+const allElements = ea.getViewElements();
+
 // Regex to capture YouTube IDs from standard and short URLs
 // Group 1: Video ID
 // Group 2: Full query/hash string (to preserve timestamps like ?t=993)
 const youtubeRegex = /^(?:https?:\/\/)?(?:www\.)?(?:youtu\.be\/|youtube\.com\/(?:watch\?v=|embed\/|v\/|live\/))([a-zA-Z0-9_-]{11})([^&\s]*)/;
 
+// Array to hold data for each new image to be created, one per link-containing element
+const elementsToReplace = [];
+
 // -----------------------------------------------------
-// 2. Scan Selection for YouTube Links
+// 2. Scan ALL Elements for YouTube Links
 // -----------------------------------------------------
-if (selectedElements.length === 0) {
-  new ea.obsidian.Notice("Please select at least one element containing a YouTube link.");
-  return;
-}
 
-const boundingBox = ea.getBoundingBox(selectedElements);
-
-// Map to store data needed for new image creation
-const linksToProcess = new Map();
-const originalElementIds = new Set();
-
-for (const el of selectedElements) {
-  // Check both text content (for text elements) and the element's link property
+for (const el of allElements) {
+  // Check element's text (for text elements) AND the element's link property
   let url = el.type === "text" ? el.text.trim() : el.link;
+
+  // Also check if the element's text is the same as its link, often the case when pasting a URL as a link
+  if (!url && el.type === "text" && el.link) {
+      url = el.link.trim();
+  }
 
   if (!url) continue;
 
@@ -42,24 +43,21 @@ for (const el of selectedElements) {
     // Construct the direct link to the high-resolution thumbnail image
     const thumbnailUrl = `https://img.youtube.com/vi/${videoID}/maxresdefault.jpg`;
     
-    // Store the data needed for image creation
-    if (!linksToProcess.has(fullLink)) {
-        linksToProcess.set(fullLink, {
-            thumbnailUrl,
-            fullLink,
-            // Use the bounding box center for placing the new image
-            x: boundingBox.topX + boundingBox.width / 2, 
-            y: boundingBox.topY + boundingBox.height / 2
-        });
-    }
-
-    // Mark the current element for deletion
-    originalElementIds.add(el.id);
+    // Store the data needed to replace the current element
+    elementsToReplace.push({
+      elementId: el.id,
+      originalX: el.x + el.width / 2,
+      originalY: el.y + el.height / 2,
+      originalWidth: el.width,
+      originalHeight: el.height,
+      fullLink,
+      thumbnailUrl,
+    });
   }
 }
 
-if (linksToProcess.size === 0) {
-  new ea.obsidian.Notice("No valid YouTube links found in the selected elements.");
+if (elementsToReplace.length === 0) {
+  new ea.obsidian.Notice("No elements containing a valid YouTube link were found in the drawing.");
   return;
 }
 
@@ -67,12 +65,18 @@ if (linksToProcess.size === 0) {
 // 3. Delete Old Elements and Prepare Workbench
 // -----------------------------------------------------
 
-// Copy all currently selected elements to the workbench for deletion
-ea.copyViewElementsToEAforEditing(selectedElements);
+// Get the actual element objects corresponding to the IDs we want to delete/modify
+const elementsToDelete = elementsToReplace.map(data => {
+    // Find the actual element object from the original array
+    return allElements.find(el => el.id === data.elementId);
+}).filter(el => el); 
 
-// Mark elements that contained a link for deletion
-for (const id of originalElementIds) {
-    const el = ea.getElement(id);
+// Copy the actual element objects (not just IDs) to the workbench for deletion/modification
+ea.copyViewElementsToEAforEditing(elementsToDelete);
+
+// Mark the original elements for deletion
+for (const data of elementsToReplace) {
+    const el = ea.getElement(data.elementId);
     if (el) el.isDeleted = true;
 }
 
@@ -80,19 +84,25 @@ for (const id of originalElementIds) {
 // 4. Insert New Image Elements AND SET THE LINK EXPLICITLY
 // -----------------------------------------------------
 const newImageIds = [];
-const DEFAULT_WIDTH = 500; // A reasonable default width for a thumbnail
+const DEFAULT_WIDTH = 560; 
 const ASPECT_RATIO = 16/9;
 
-for (const [, linkData] of linksToProcess) {
+for (const data of elementsToReplace) {
+  // Determine new image size, prioritizing old element's size if reasonable
+  // Text elements often have small widths, so use a sensible default.
+  const newWidth = data.originalWidth > 100 || data.originalWidth === 0
+    ? DEFAULT_WIDTH 
+    : data.originalWidth;
+  const newHeight = newWidth / ASPECT_RATIO;
   
-  // 1. Clear or set a temporary link for ea.addImage to ensure proper processing
+  // 1. Clear the link from the global style to avoid unintended propagation/overrides
   ea.style.link = null; 
   
-  // 2. Add the image element using the thumbnail URL
+  // 2. Add the image element using the thumbnail URL. It will be positioned using the original center.
   const imageId = await ea.addImage(
-    linkData.x - DEFAULT_WIDTH / 2, // Center the image X
-    linkData.y - (DEFAULT_WIDTH / ASPECT_RATIO) / 2, // Center the image Y
-    linkData.thumbnailUrl, 
+    data.originalX - newWidth / 2, // Center the image X
+    data.originalY - newHeight / 2, // Center the image Y
+    data.thumbnailUrl, 
     false, // Do not auto-scale to fit max size
     false  // Do not anchor 
   );
@@ -101,9 +111,9 @@ for (const [, linkData] of linksToProcess) {
   
   if (newImage) {
     // 3. Manually set size and, CRUCIALLY, the correct link directly on the element
-    newImage.width = DEFAULT_WIDTH;
-    newImage.height = DEFAULT_WIDTH / ASPECT_RATIO;
-    newImage.link = linkData.fullLink; // <--- The Fix: Explicitly set the link property
+    newImage.width = newWidth;
+    newImage.height = newHeight;
+    newImage.link = data.fullLink; // <--- Set the original YouTube URL as the element's link
   }
   
   newImageIds.push(imageId);
