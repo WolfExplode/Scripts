@@ -1,6 +1,8 @@
-# Video Audio Extractor - Batch Processor
+# This github repository is for dumping my various scipts
+
+## Video Audio Extractor - Batch Processor
 This Gradio application allows you to extract audio from multiple video files in a specified directory, with various options for encoding, album art embedding, and metadata tagging.
-## Features
+### Features
 - **Batch Processing:** Process all video files within a given input directory.
 - **Audio Extraction:** Extract audio streams from common video formats.
 - **Audio Re-encoding:** Optionally re-encode extracted audio to various formats (MP3, AAC, FLAC, Opus, WAV) with adjustable quality.
@@ -13,19 +15,19 @@ This Gradio application allows you to extract audio from multiple video files in
 - **Real-time Status Updates:** View processing status and logs directly in the Gradio interface.
 - **Audio Preview:** Listen to the last extracted audio file directly in the application.
 
-## Requirements
+### Requirements
 - Python 3.x
 - `ffmpeg` and `ffprobe` (must be installed and accessible in your system's PATH)
 - `Gradio` Python library (`pip install gradio`)
 - `mutagen` Python library (optional, but highly recommended for metadata tagging: `pip install mutagen`)
 
-## Installation
+### Installation
 1. **Install FFmpeg:** Download and install `ffmpeg` from [ffmpeg.org](https://ffmpeg.org/download.html "null"). Ensure that `ffmpeg` and `ffprobe` are added to your system's PATH environment variable.
 2. **Install Python Dependencies:**
     ```
     pip install gradio mutagen
     ```
-## How to Use
+### How to Use
 1. **Save the Script:** Save the provided Python code as `audio_toolkit.py` (or any other `.py` file).
 2. **Run the Application:** Open your terminal or command prompt, navigate to the directory where you saved the script, and run:
     ```
@@ -49,7 +51,7 @@ This Gradio application allows you to extract audio from multiple video files in
     - **Overwrite existing audio files:** If checked, any existing audio files with the same name in the output directory will be overwritten. If unchecked, they will be skipped.
     - **Start Batch Processing:** Click this button to begin the extraction process.
 5. **Monitor Status:** The "Processing Status" textbox will display real-time updates and logs. The "Last Extracted Audio (Preview)" will allow you to listen to the most recently processed audio file.
-## Helper Functions
+### Helper Functions
 The script includes several helper functions:
 - `set_title_from_filename(audio_path)`: Sets the `TITLE` metadata tag for various audio formats.
 - `get_audio_codec(video_file)`: Retrieves the audio codec of a video file using `ffprobe`.
@@ -57,7 +59,7 @@ The script includes several helper functions:
 - `extract_first_frame(video_file, output_dir)`: Extracts the first frame of a video as a JPEG image.
 - `add_album_art(audio_file, image_file)`: Embeds an image file as album art into an audio file.
 - `process_videos_in_directory(...)`: The main function that orchestrates the batch processing of video files.
-## Important Notes
+### Important Notes
 - **FFmpeg/FFprobe:** Ensure `ffmpeg` and `ffprobe` are correctly installed and in your system's PATH for the script to function.
 - **Mutagen:** While optional, installing `mutagen` is necessary for the metadata tagging feature to work.
 - **File Paths:** Use absolute paths for input and output directories to avoid issues.
