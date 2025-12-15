@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         Twitter Scraper for /with_replies
 // @namespace    http://tampermonkey.net/
-// @version      0.1.2
+// @version      0.1.3
 // @description  Scrapes Twitter /with_replies page with conversation-aware sorting
 // @author       WXP
 // @match        https://*.twitter.com/*/with_replies
 // @match        https://*.x.com/*/with_replies
-// @grant        none
+// @grant        GM_getResourceText
+// @resource     EMOJI_MAP https://raw.githubusercontent.com/WolfExplode/Scripts/main/emoji-map.json
 // ==/UserScript==
 
 (function() {
@@ -17,11 +18,36 @@
     const account = window.location.pathname.split('/')[1];
     const profileHandle = `@${account}`;
 
+    // Emoji URL -> Unicode emoji (loaded from Tampermonkey @resource EMOJI_MAP)
+    // Resource: https://raw.githubusercontent.com/WolfExplode/Scripts/main/emoji-map.json
+    let EMOJI_MAP = {};
+    try {
+        if (typeof GM_getResourceText === 'function') {
+            const raw = GM_getResourceText('EMOJI_MAP');
+            EMOJI_MAP = raw ? JSON.parse(raw) : {};
+        }
+    } catch (e) {
+        console.warn('Failed to load/parse EMOJI_MAP resource:', e);
+        EMOJI_MAP = {};
+    }
+
+    function normalizeEmojiUrl(url) {
+        return (url || '').trim();
+    }
+
+    function emojiUrlToUnicode(url) {
+        const key = normalizeEmojiUrl(url);
+        return EMOJI_MAP[key] || '';
+    }
+
     function toEmojiMarkdown(imgEl) {
         const alt = imgEl?.getAttribute?.('alt') || imgEl?.getAttribute?.('title') || 'emoji';
         const src = imgEl?.getAttribute?.('src') || '';
         if (!src) return alt;
-        // Format requested: ![Alt Text|18](https://abs-0.twimg.com/emoji/v2/svg/xxxx.svg)
+        const mapped = emojiUrlToUnicode(src);
+        if (mapped) return mapped;
+        // Fallback when the emoji isn't in the map.
+        // Format: ![Alt Text|18](https://abs-0.twimg.com/emoji/v2/svg/xxxx.svg)
         return `![${alt}|18](${src})`;
     }
 
