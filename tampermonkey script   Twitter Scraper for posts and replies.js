@@ -22,7 +22,16 @@
 
     // Optional "start from this tweet" gating
     let startFromTweetId = null; // full status URL (as used by tweet.id)
+    let startFromTweetExclusive = false; // if true: resume *after* this tweet (skip the match)
     let hasReachedStartTweet = false;
+
+    // Auto-stop detection
+    let autoStopEnabled = true;
+    let autoDownloadOnAutoStop = true;
+    let consecutiveNoNewTicks = 0;
+    let lastScrollY = 0;
+    let lastScrollHeight = 0;
+    const MAX_NO_NEW_TICKS = 8; // ~12s with 1500ms interval
 
     // Picker-mode state
     let isPickingStartTweet = false;
@@ -31,9 +40,238 @@
     let priorOutline = '';
     let priorOutlineOffset = '';
 
+    // Auto-scroll-to-text state (QoL tool; independent from scraping)
+    let autoScrollToTextInterval = null;
+    let autoScrollNeedle = '';
+    let autoScrollTicks = 0;
+    let autoScrollStartMs = 0;
+    let autoScrollStalledTicks = 0;
+    let autoScrollLastScrollY = 0;
+    let autoScrollLastScrollH = 0;
+    let autoScrollLastHighlightedTweet = null;
+    let autoScrollPriorOutline = '';
+    let autoScrollPriorOutlineOffset = '';
+    const AUTO_SCROLL_HIGHLIGHT_STYLE = '3px solid #f59e0b';
+    const AUTO_SCROLL_TICK_MS = 850;
+    const AUTO_SCROLL_MAX_TICKS = 6000; // safety limit (~85 minutes)
+
+    const STORAGE_KEYS = {
+        startTweetId: 'wxp_tw_scraper_start_tweet_id',
+        startTweetExclusive: 'wxp_tw_scraper_start_tweet_exclusive'
+    };
+
     function setUiStatus(text) {
         const el = document.getElementById('wxp-scraper-status');
         if (el) el.textContent = text || '';
+    }
+
+    function setAutoScrollStatus(text) {
+        const el = document.getElementById('wxp-autoscroll-status');
+        if (el) el.textContent = text || '';
+    }
+
+    function findFirstTweetContainingText(needle) {
+        const n = String(needle || '');
+        if (!n) return null;
+
+        const tweetEls = document.querySelectorAll('article[data-testid="tweet"]');
+        for (let i = 0; i < tweetEls.length; i++) {
+            const tweet = tweetEls[i];
+            const tweetTextEl = tweet.querySelector?.('[data-testid="tweetText"]');
+            const hay = (tweetTextEl?.innerText || tweet?.innerText || '').trim();
+            if (hay && hay.includes(n)) return tweet;
+        }
+        return null;
+    }
+
+    function applyAutoScrollHighlight(tweetEl) {
+        if (!tweetEl) return;
+        if (autoScrollLastHighlightedTweet === tweetEl) return;
+
+        if (autoScrollLastHighlightedTweet && autoScrollLastHighlightedTweet !== tweetEl) {
+            autoScrollLastHighlightedTweet.style.outline = autoScrollPriorOutline || '';
+            autoScrollLastHighlightedTweet.style.outlineOffset = autoScrollPriorOutlineOffset || '';
+        }
+
+        autoScrollPriorOutline = tweetEl.style.outline;
+        autoScrollPriorOutlineOffset = tweetEl.style.outlineOffset;
+        tweetEl.style.outline = AUTO_SCROLL_HIGHLIGHT_STYLE;
+        tweetEl.style.outlineOffset = '2px';
+        autoScrollLastHighlightedTweet = tweetEl;
+    }
+
+    function clearAutoScrollHighlight() {
+        if (!autoScrollLastHighlightedTweet) return;
+        autoScrollLastHighlightedTweet.style.outline = autoScrollPriorOutline || '';
+        autoScrollLastHighlightedTweet.style.outlineOffset = autoScrollPriorOutlineOffset || '';
+        autoScrollLastHighlightedTweet = null;
+        autoScrollPriorOutline = '';
+        autoScrollPriorOutlineOffset = '';
+    }
+
+    function stopAutoScrollToText(reason) {
+        if (autoScrollToTextInterval) {
+            clearInterval(autoScrollToTextInterval);
+            autoScrollToTextInterval = null;
+        }
+        autoScrollNeedle = '';
+        autoScrollTicks = 0;
+        autoScrollStartMs = 0;
+        autoScrollStalledTicks = 0;
+        autoScrollLastScrollY = 0;
+        autoScrollLastScrollH = 0;
+
+        const btn = document.getElementById('wxp-autoscroll-btn');
+        if (btn) btn.textContent = 'Scroll to text';
+
+        if (reason) setAutoScrollStatus(reason);
+    }
+
+    function startAutoScrollToText(needle) {
+        const n = String(needle || '').trim();
+        if (!n) {
+            setAutoScrollStatus('Auto-scroll: enter a target string first.');
+            return;
+        }
+
+        if (autoScrollToTextInterval) {
+            stopAutoScrollToText('Auto-scroll: stopped.');
+            return;
+        }
+
+        autoScrollNeedle = n;
+        autoScrollTicks = 0;
+        autoScrollStartMs = Date.now();
+        autoScrollStalledTicks = 0;
+        autoScrollLastScrollY = window.scrollY;
+        autoScrollLastScrollH = document.documentElement.scrollHeight;
+
+        const btn = document.getElementById('wxp-autoscroll-btn');
+        if (btn) btn.textContent = 'Stop scrolling';
+
+        setAutoScrollStatus(`Auto-scroll: searching for “${n}” …`);
+
+        autoScrollToTextInterval = setInterval(() => {
+            autoScrollTicks++;
+
+            const matchTweet = findFirstTweetContainingText(autoScrollNeedle);
+            if (matchTweet) {
+                applyAutoScrollHighlight(matchTweet);
+                try {
+                    matchTweet.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                } catch {
+                    // ignore
+                }
+                const secs = Math.max(0, Math.round((Date.now() - autoScrollStartMs) / 1000));
+                stopAutoScrollToText(`Auto-scroll: found match after ${secs}s.`);
+                return;
+            }
+
+            // Scroll down to load more
+            const beforeY = window.scrollY;
+            const beforeH = document.documentElement.scrollHeight;
+            window.scrollBy(0, Math.max(400, Math.floor(window.innerHeight * 0.85)));
+            const afterY = window.scrollY;
+            const afterH = document.documentElement.scrollHeight;
+
+            const didScroll = afterY !== beforeY;
+            const didGrow = afterH !== beforeH;
+            if (!didScroll && !didGrow && afterY === autoScrollLastScrollY && afterH === autoScrollLastScrollH) {
+                autoScrollStalledTicks++;
+            } else {
+                autoScrollStalledTicks = 0;
+            }
+            autoScrollLastScrollY = afterY;
+            autoScrollLastScrollH = afterH;
+
+            if (autoScrollTicks % 10 === 0) {
+                const secs = Math.max(0, Math.round((Date.now() - autoScrollStartMs) / 1000));
+                setAutoScrollStatus(`Auto-scroll: searching (${secs}s) …`);
+            }
+
+            if (isEndOfTimelineVisible() && autoScrollStalledTicks >= 3) {
+                stopAutoScrollToText('Auto-scroll: reached end of timeline (no match found).');
+                return;
+            }
+
+            if (autoScrollStalledTicks >= 12) {
+                stopAutoScrollToText('Auto-scroll: stalled (no new content). Try again or scroll manually a bit.');
+                return;
+            }
+
+            if (autoScrollTicks >= AUTO_SCROLL_MAX_TICKS) {
+                stopAutoScrollToText('Auto-scroll: stopped (safety limit reached).');
+            }
+        }, AUTO_SCROLL_TICK_MS);
+    }
+
+    function formatStartTweetStatus() {
+        if (!startFromTweetId) return 'Start tweet: (none)';
+        return startFromTweetExclusive
+            ? `Resume after: ${startFromTweetId}`
+            : `Start tweet: ${startFromTweetId}`;
+    }
+
+    function loadStartTweetCheckpoint() {
+        try {
+            const savedId = localStorage.getItem(STORAGE_KEYS.startTweetId);
+            const savedExclusive = localStorage.getItem(STORAGE_KEYS.startTweetExclusive);
+            if (savedId) {
+                startFromTweetId = savedId;
+                startFromTweetExclusive = savedExclusive === 'true';
+            }
+        } catch {
+            // ignore
+        }
+    }
+
+    function saveStartTweetCheckpoint() {
+        try {
+            if (!startFromTweetId) {
+                localStorage.removeItem(STORAGE_KEYS.startTweetId);
+                localStorage.removeItem(STORAGE_KEYS.startTweetExclusive);
+                return;
+            }
+            localStorage.setItem(STORAGE_KEYS.startTweetId, startFromTweetId);
+            localStorage.setItem(STORAGE_KEYS.startTweetExclusive, String(!!startFromTweetExclusive));
+        } catch {
+            // ignore
+        }
+    }
+
+    function isEndOfTimelineVisible() {
+        // Best-effort: detect "end" messaging Twitter/X sometimes shows.
+        const endTexts = [
+            "you’re all caught up",
+            "you're all caught up",
+            "you have caught up",
+            "you’ve reached the end",
+            "you've reached the end",
+            "nothing to see here",
+            "no more posts",
+            "no more tweets",
+            "end of results",
+            "end of the results"
+        ];
+
+        const candidates = document.querySelectorAll('div[role="status"], div[aria-live], span, div');
+        for (let i = 0; i < candidates.length; i++) {
+            const t = (candidates[i]?.textContent || '').trim().toLowerCase();
+            if (!t) continue;
+            for (const endText of endTexts) {
+                if (t.includes(endText)) return true;
+            }
+        }
+        return false;
+    }
+
+    function stopScrapingInterval(reason) {
+        if (scrollInterval) {
+            clearInterval(scrollInterval);
+            scrollInterval = null;
+        }
+        if (reason) console.log(reason);
+        setUiStatus(reason || 'Stopped.');
     }
 
     function normalizeStatusUrl(url) {
@@ -61,6 +299,19 @@
             .replace(/]/g, '\\]');
     }
 
+    function escapeMarkdownInlineTextPreservingUrls(line) {
+        // Escape inline markdown controls, but keep URLs intact (URLs often contain "_" etc).
+        const urls = [];
+        const withTokens = String(line || '').replace(/\bhttps?:\/\/[^\s)]+/gi, (url) => {
+            const token = `\u001AURL${urls.length}\u001A`;
+            urls.push(url);
+            return token;
+        });
+
+        const escaped = escapeMarkdownInlineText(withTokens);
+        return escaped.replace(/\u001AURL(\d+)\u001A/g, (_, i) => urls[Number(i)] || '');
+    }
+
     function getTweetIdFromTweetEl(tweetEl) {
         const a = tweetEl?.querySelector?.('a[href*="/status/"]');
         return normalizeStatusUrl(a?.href || '');
@@ -68,8 +319,10 @@
 
     function clearStartTweetSelection() {
         startFromTweetId = null;
+        startFromTweetExclusive = false;
         hasReachedStartTweet = true; // no gate
-        setUiStatus('Start tweet: (none)');
+        saveStartTweetCheckpoint();
+        setUiStatus(formatStartTweetStatus());
     }
 
     function applyHighlight(tweetEl) {
@@ -102,7 +355,7 @@
         if (!isPickingStartTweet) return;
         isPickingStartTweet = false;
         clearHighlight();
-        setUiStatus(startFromTweetId ? `Start tweet: ${startFromTweetId}` : 'Start tweet: (none)');
+        setUiStatus(formatStartTweetStatus());
     }
 
     function startPickingMode() {
@@ -136,6 +389,8 @@
         }
 
         startFromTweetId = pickedId;
+        startFromTweetExclusive = false; // picker means "include this tweet"
+        saveStartTweetCheckpoint();
         hasReachedStartTweet = false;
         stopPickingMode();
     }
@@ -229,15 +484,25 @@
         // Secondary: Twitter often already provides the Unicode in `alt`.
         if (alt) return alt;
 
-        // Fallback: keep the old markdown image representation.
-        if (!src) return 'emoji';
-        return `![emoji|18](${src})`;
+        // Fallback: do NOT emit markdown image syntax here, because tweet body text
+        // gets markdown-escaped for Obsidian/CommonMark (which would break it).
+        // If we can't map the emoji, just keep a placeholder.
+        return 'emoji';
     }
 
     function extractTweetTextWithEmojis(rootEl) {
         if (!rootEl) return '';
 
         const out = [];
+
+        // Some translation extensions (e.g. Immersive Translate) inject wrapper <font> nodes like:
+        // .immersive-translate-target-wrapper -> (hidden <br>) -> .immersive-translate-target-inner
+        // Prefer scraping the translated "inner" content to avoid duplicated/malformed output.
+        const translatedInner =
+            rootEl.querySelector?.('.immersive-translate-target-inner') ||
+            rootEl.querySelector?.('.immersive-translate-target-translation-block-wrapper') ||
+            rootEl.querySelector?.('[data-immersive-translate-translation-element-mark]');
+        const effectiveRoot = translatedInner || rootEl;
 
         const walk = (node) => {
             if (!node) return;
@@ -253,12 +518,19 @@
                 const el = /** @type {HTMLElement} */ (node);
                 const tag = (el.tagName || '').toUpperCase();
 
+                // Skip hidden/aria-hidden nodes (translation tools often inject hidden separators).
+                if (el.hasAttribute('hidden') || el.getAttribute('aria-hidden') === 'true') {
+                    return;
+                }
+
                 if (tag === 'IMG') {
                     out.push(toEmojiTextOrMarkdown(el));
                     return;
                 }
 
                 if (tag === 'BR') {
+                    // Ignore hidden <br> (common in injected translation wrappers).
+                    if (el.hasAttribute('hidden')) return;
                     out.push('\n');
                     return;
                 }
@@ -268,7 +540,7 @@
             }
         };
 
-        walk(rootEl);
+        walk(effectiveRoot);
         return out.join('');
     }
 
@@ -277,10 +549,63 @@
         console.log(`Scraping started for ${profileHandle}'s replies page...`);
         // Gate extraction until we hit the selected start tweet, if any.
         hasReachedStartTweet = !startFromTweetId;
-        setUiStatus(startFromTweetId ? `Start tweet: ${startFromTweetId}` : 'Start tweet: (none)');
+        setUiStatus(formatStartTweetStatus());
+
+        consecutiveNoNewTicks = 0;
+        lastScrollY = window.scrollY;
+        lastScrollHeight = document.documentElement.scrollHeight;
+
         scrollInterval = setInterval(() => {
+            const beforeCount = scrapedData.length;
+            const beforeY = window.scrollY;
+            const beforeH = document.documentElement.scrollHeight;
+
             window.scrollBy(0, window.innerHeight * 0.8);
             extractTweets();
+
+            const afterCount = scrapedData.length;
+            const afterY = window.scrollY;
+            const afterH = document.documentElement.scrollHeight;
+
+            const didAddAny = afterCount > beforeCount;
+            const didScroll = afterY !== beforeY;
+            const didGrow = afterH !== beforeH;
+
+            if (didAddAny) {
+                consecutiveNoNewTicks = 0;
+            } else {
+                consecutiveNoNewTicks++;
+            }
+
+            // If we can no longer scroll AND no new tweets are being found, we are likely at the end.
+            if (autoStopEnabled) {
+                // If we're still waiting to reach the start tweet checkpoint, do NOT auto-stop.
+                if (!hasReachedStartTweet && startFromTweetId) {
+                    consecutiveNoNewTicks = 0;
+                    lastScrollY = afterY;
+                    lastScrollHeight = afterH;
+                    setUiStatus(`Waiting for start tweet… ${formatStartTweetStatus()}`);
+                    return;
+                }
+
+                const endVisible = isEndOfTimelineVisible();
+                const stalledScroll = !didScroll && !didGrow && afterY === lastScrollY && afterH === lastScrollHeight;
+
+                if (endVisible && consecutiveNoNewTicks >= 2) {
+                    stopScrapingInterval(`Auto-stopped: end of timeline detected (tweets: ${afterCount}).`);
+                    if (autoDownloadOnAutoStop) stopAndDownload();
+                    return;
+                }
+
+                if (consecutiveNoNewTicks >= MAX_NO_NEW_TICKS && stalledScroll) {
+                    stopScrapingInterval(`Auto-stopped: no new tweets detected (ticks: ${consecutiveNoNewTicks}, tweets: ${afterCount}).`);
+                    if (autoDownloadOnAutoStop) stopAndDownload();
+                    return;
+                }
+            }
+
+            lastScrollY = afterY;
+            lastScrollHeight = afterH;
         }, 1500);
     }
 
@@ -302,6 +627,7 @@
             if (!hasReachedStartTweet && startFromTweetId) {
                 if (tweetId !== startFromTweetId) return;
                 hasReachedStartTweet = true;
+                if (startFromTweetExclusive) return; // resume AFTER this tweet
             }
 
             const tweetTextElement = tweet.querySelector('[data-testid="tweetText"]');
@@ -341,8 +667,21 @@
     }
 
     function stopAndDownload() {
-        clearInterval(scrollInterval);
+        stopScrapingInterval(`Scraping stopped. Processing ${scrapedData.length} tweets...`);
         console.log(`Scraping stopped. Processing ${scrapedData.length} tweets...`);
+
+        // Save a resume checkpoint: pick up *after* the last scraped tweet next time.
+        // This is intentionally based on raw scrapedData (not the processed sequence).
+        let lastId = '';
+        for (let i = scrapedData.length - 1; i >= 0; i--) {
+            const id = scrapedData[i]?.id;
+            if (id) { lastId = id; break; }
+        }
+        if (lastId) {
+            startFromTweetId = normalizeStatusUrl(lastId);
+            startFromTweetExclusive = true;
+            saveStartTweetCheckpoint();
+        }
 
         // **Step 1 & 2: Identify root tweets and separate comment sections**
         // We loop through scrapedData (DOM order) and split it into sections
@@ -422,6 +761,9 @@
         
         console.log(`Processed ${rootTweetData.length} root tweet sections with conversation-aware sorting.`);
         generateMarkdown(finalSequence, `${account}_with_replies.md`);
+
+        // Update status after download to show the saved checkpoint.
+        setUiStatus(`Downloaded. ${formatStartTweetStatus()}`);
     }
 
     /**
@@ -657,7 +999,8 @@
                 .filter(line => line.trim().length > 0)
                 .map(line => {
                     const formattedLine = wrapBareUrlsForMarkdown(line);
-                    return `${textIndent}${formattedLine}`;
+                    const safeLine = escapeMarkdownInlineTextPreservingUrls(formattedLine);
+                    return `${textIndent}${safeLine}`;
                 });
 
             if (renderedLines.length > 0) {
@@ -695,19 +1038,44 @@
     }
 
     // --- UI Setup ---
+    // Load any saved checkpoint before building UI (so the status line reflects it).
+    loadStartTweetCheckpoint();
+
     const uiContainer = document.createElement('div');
     uiContainer.style.cssText = 'position:fixed;top:10px;left:10px;z-index:9999;padding:8px;background:rgba(255, 255, 255, 0.9);border:1px solid #ccc;border-radius:6px;box-shadow:0 2px 5px rgba(0,0,0,0.2);display:flex;flex-direction:column;gap:5px;';
 
     const statusLine = document.createElement('div');
     statusLine.id = 'wxp-scraper-status';
     statusLine.style.cssText = 'font:12px/1.3 system-ui, -apple-system, Segoe UI, Roboto, Arial;max-width:320px;color:#111;';
-    statusLine.textContent = 'Start tweet: (none)';
+    statusLine.textContent = formatStartTweetStatus();
     uiContainer.appendChild(statusLine);
+
+    const autoStopRow = document.createElement('label');
+    autoStopRow.style.cssText = 'display:flex;align-items:center;gap:6px;font:12px system-ui, -apple-system, Segoe UI, Roboto, Arial;color:#111;user-select:none;';
+    const autoStopCb = document.createElement('input');
+    autoStopCb.type = 'checkbox';
+    autoStopCb.checked = autoStopEnabled;
+    autoStopCb.onchange = () => { autoStopEnabled = autoStopCb.checked; };
+    autoStopRow.appendChild(autoStopCb);
+    autoStopRow.appendChild(document.createTextNode('Auto-stop when no new tweets'));
+    uiContainer.appendChild(autoStopRow);
+
+    const autoDlRow = document.createElement('label');
+    autoDlRow.style.cssText = 'display:flex;align-items:center;gap:6px;font:12px system-ui, -apple-system, Segoe UI, Roboto, Arial;color:#111;user-select:none;';
+    const autoDlCb = document.createElement('input');
+    autoDlCb.type = 'checkbox';
+    autoDlCb.checked = autoDownloadOnAutoStop;
+    autoDlCb.onchange = () => { autoDownloadOnAutoStop = autoDlCb.checked; };
+    autoDlRow.appendChild(autoDlCb);
+    autoDlRow.appendChild(document.createTextNode('Auto-download on auto-stop'));
+    uiContainer.appendChild(autoDlRow);
 
     const pickStartButton = document.createElement('button');
     pickStartButton.textContent = 'Pick start tweet';
     pickStartButton.style.cssText = 'padding:8px;background:#6b7280;color:white;border:none;border-radius:4px;cursor:pointer;';
     pickStartButton.onclick = () => {
+        // Avoid fighting scroll/hover while in picker mode.
+        stopAutoScrollToText('Auto-scroll: stopped (picker mode).');
         if (isPickingStartTweet) {
             stopPickingMode();
             return;
@@ -725,10 +1093,50 @@
     };
     uiContainer.appendChild(clearStartButton);
 
+    // --- QoL: Auto-scroll until a specific text is rendered in a tweet ---
+    const autoScrollLabel = document.createElement('div');
+    autoScrollLabel.style.cssText = 'font:12px system-ui, -apple-system, Segoe UI, Roboto, Arial;color:#111;margin-top:4px;';
+    autoScrollLabel.textContent = 'Auto-scroll to text (stops when found):';
+    uiContainer.appendChild(autoScrollLabel);
+
+    const autoScrollRow = document.createElement('div');
+    autoScrollRow.style.cssText = 'display:flex;align-items:center;gap:6px;';
+
+    const autoScrollInput = document.createElement('input');
+    autoScrollInput.type = 'text';
+    autoScrollInput.placeholder = 'Paste a snippet from the target tweet…';
+    autoScrollInput.style.cssText = 'flex:1;min-width:180px;padding:6px 8px;border:1px solid #cbd5e1;border-radius:4px;font:12px system-ui, -apple-system, Segoe UI, Roboto, Arial;';
+
+    const autoScrollBtn = document.createElement('button');
+    autoScrollBtn.id = 'wxp-autoscroll-btn';
+    autoScrollBtn.textContent = 'Scroll to text';
+    autoScrollBtn.style.cssText = 'padding:8px;background:#f59e0b;color:#111;border:none;border-radius:4px;cursor:pointer;white-space:nowrap;';
+    autoScrollBtn.onclick = () => startAutoScrollToText(autoScrollInput.value);
+
+    autoScrollInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            autoScrollBtn.click();
+        }
+    });
+
+    autoScrollRow.appendChild(autoScrollInput);
+    autoScrollRow.appendChild(autoScrollBtn);
+    uiContainer.appendChild(autoScrollRow);
+
+    const autoScrollStatus = document.createElement('div');
+    autoScrollStatus.id = 'wxp-autoscroll-status';
+    autoScrollStatus.style.cssText = 'font:12px/1.3 system-ui, -apple-system, Segoe UI, Roboto, Arial;max-width:320px;color:#111;';
+    autoScrollStatus.textContent = 'Auto-scroll: idle.';
+    uiContainer.appendChild(autoScrollStatus);
+
     const startButton = document.createElement('button');
     startButton.textContent = 'Start Scraping';
     startButton.style.cssText = 'padding:8px;background:#1da1f2;color:white;border:none;border-radius:4px;cursor:pointer;';
-    startButton.onclick = startScraping;
+    startButton.onclick = () => {
+        stopAutoScrollToText('Auto-scroll: stopped (scraper started).');
+        startScraping();
+    };
     uiContainer.appendChild(startButton);
 
     const stopButton = document.createElement('button');
