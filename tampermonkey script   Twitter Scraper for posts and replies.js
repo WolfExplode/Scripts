@@ -18,37 +18,220 @@
     const account = window.location.pathname.split('/')[1];
     const profileHandle = `@${account}`;
 
-    // Emoji URL -> Unicode emoji (loaded from Tampermonkey @resource EMOJI_MAP)
-    // Resource: https://raw.githubusercontent.com/WolfExplode/Scripts/main/emoji-map.json
-    let EMOJI_MAP = {};
-    try {
-        if (typeof GM_getResourceText === 'function') {
-            const raw = GM_getResourceText('EMOJI_MAP');
-            EMOJI_MAP = raw ? JSON.parse(raw) : {};
+    let emojiMapCache = null;
+
+    // Optional "start from this tweet" gating
+    let startFromTweetId = null; // full status URL (as used by tweet.id)
+    let hasReachedStartTweet = false;
+
+    // Picker-mode state
+    let isPickingStartTweet = false;
+    let lastHighlightedTweet = null;
+    const PICK_HIGHLIGHT_STYLE = '3px solid #1da1f2';
+    let priorOutline = '';
+    let priorOutlineOffset = '';
+
+    function setUiStatus(text) {
+        const el = document.getElementById('wxp-scraper-status');
+        if (el) el.textContent = text || '';
+    }
+
+    function normalizeStatusUrl(url) {
+        if (!url) return '';
+        try {
+            const u = new URL(url, window.location.origin);
+            // Strip query/hash to make matching stable
+            u.search = '';
+            u.hash = '';
+            return u.toString();
+        } catch {
+            return url;
         }
-    } catch (e) {
-        console.warn('Failed to load/parse EMOJI_MAP resource:', e);
-        EMOJI_MAP = {};
     }
 
-    function normalizeEmojiUrl(url) {
-        return (url || '').trim();
+    function escapeMarkdownInlineText(text) {
+        // Prevent Obsidian/CommonMark from treating usernames like @h____n900 as emphasis.
+        // Escape the most common inline-markdown control chars.
+        return String(text || '')
+            .replace(/\\/g, '\\\\')
+            .replace(/\*/g, '\\*')
+            .replace(/_/g, '\\_')
+            .replace(/`/g, '\\`')
+            .replace(/\[/g, '\\[')
+            .replace(/]/g, '\\]');
     }
 
-    function emojiUrlToUnicode(url) {
-        const key = normalizeEmojiUrl(url);
-        return EMOJI_MAP[key] || '';
+    function getTweetIdFromTweetEl(tweetEl) {
+        const a = tweetEl?.querySelector?.('a[href*="/status/"]');
+        return normalizeStatusUrl(a?.href || '');
     }
 
-    function toEmojiMarkdown(imgEl) {
-        const alt = imgEl?.getAttribute?.('alt') || imgEl?.getAttribute?.('title') || 'emoji';
+    function clearStartTweetSelection() {
+        startFromTweetId = null;
+        hasReachedStartTweet = true; // no gate
+        setUiStatus('Start tweet: (none)');
+    }
+
+    function applyHighlight(tweetEl) {
+        if (!tweetEl) return;
+        // If we're still on the same tweet, don't re-apply styles (avoids clobbering priorOutline).
+        if (lastHighlightedTweet === tweetEl) return;
+        // Restore previous highlight
+        if (lastHighlightedTweet && lastHighlightedTweet !== tweetEl) {
+            lastHighlightedTweet.style.outline = priorOutline || '';
+            lastHighlightedTweet.style.outlineOffset = priorOutlineOffset || '';
+        }
+        // Save current tweet's prior styles (only once per element swap)
+        priorOutline = tweetEl.style.outline;
+        priorOutlineOffset = tweetEl.style.outlineOffset;
+        tweetEl.style.outline = PICK_HIGHLIGHT_STYLE;
+        tweetEl.style.outlineOffset = '2px';
+        lastHighlightedTweet = tweetEl;
+    }
+
+    function clearHighlight() {
+        if (!lastHighlightedTweet) return;
+        lastHighlightedTweet.style.outline = priorOutline || '';
+        lastHighlightedTweet.style.outlineOffset = priorOutlineOffset || '';
+        lastHighlightedTweet = null;
+        priorOutline = '';
+        priorOutlineOffset = '';
+    }
+
+    function stopPickingMode() {
+        if (!isPickingStartTweet) return;
+        isPickingStartTweet = false;
+        clearHighlight();
+        setUiStatus(startFromTweetId ? `Start tweet: ${startFromTweetId}` : 'Start tweet: (none)');
+    }
+
+    function startPickingMode() {
+        isPickingStartTweet = true;
+        setUiStatus('Picker mode: hover a tweet to highlight, click to select. Press Esc to cancel.');
+    }
+
+    function onPickerMouseMove(e) {
+        if (!isPickingStartTweet) return;
+        const tweet = e.target?.closest?.('article[data-testid="tweet"]');
+        if (tweet) {
+            applyHighlight(tweet);
+        } else {
+            clearHighlight();
+        }
+    }
+
+    function onPickerClick(e) {
+        if (!isPickingStartTweet) return;
+
+        const tweet = e.target?.closest?.('article[data-testid="tweet"]');
+        if (!tweet) return;
+
+        e.preventDefault();
+        e.stopPropagation();
+
+        const pickedId = getTweetIdFromTweetEl(tweet);
+        if (!pickedId) {
+            setUiStatus('Could not read tweet URL from that element. Try clicking the timestamp/link area.');
+            return;
+        }
+
+        startFromTweetId = pickedId;
+        hasReachedStartTweet = false;
+        stopPickingMode();
+    }
+
+    function onPickerKeyDown(e) {
+        if (!isPickingStartTweet) return;
+        if (e.key === 'Escape') {
+            e.preventDefault();
+            stopPickingMode();
+        }
+    }
+
+    function extractAvatarUrl(tweetEl) {
+        if (!tweetEl) return '';
+
+        // Prefer the explicit avatar container (stable testid).
+        const img =
+            tweetEl.querySelector('[data-testid="Tweet-User-Avatar"] img[src^="http"]') ||
+            tweetEl.querySelector('[data-testid^="UserAvatar-Container"] img[src^="http"]') ||
+            tweetEl.querySelector('img[src*="pbs.twimg.com/profile_images/"]');
+
+        const directSrc = img?.getAttribute?.('src') || '';
+        if (directSrc) return directSrc;
+
+        // Fallback: some avatars may be set as background-image on a nested div.
+        const bgEl =
+            tweetEl.querySelector('[data-testid="Tweet-User-Avatar"] div[style*="background-image"]') ||
+            tweetEl.querySelector('div[style*="background-image"][style*="profile_images"]');
+
+        const style = bgEl?.getAttribute?.('style') || '';
+        const match = style.match(/background-image:\s*url\(["']?([^"')]+)["']?\)/i);
+        return match?.[1] || '';
+    }
+
+    function getEmojiMap() {
+        // Optional optimization/accuracy layer.
+        // Some Twitter emoji SVG filenames omit variation selectors (e.g. "263a.svg" maps to "☺️"),
+        // so a URL->Unicode map can be more correct than filename parsing.
+        if (emojiMapCache) return emojiMapCache;
+        try {
+            if (typeof GM_getResourceText === 'function') {
+                const jsonText = GM_getResourceText('EMOJI_MAP');
+                if (jsonText) {
+                    emojiMapCache = JSON.parse(jsonText);
+                    return emojiMapCache;
+                }
+            }
+        } catch {
+            // ignore, fallback logic below will handle missing map
+        }
+        emojiMapCache = null;
+        return null;
+    }
+
+    function emojiUnicodeFromTwitterUrl(src) {
+        if (!src) return null;
+
+        // 1) Prefer explicit mapping if available (handles VS16/ZWJ edge cases).
+        const emojiMap = getEmojiMap();
+        if (emojiMap && typeof emojiMap === 'object' && emojiMap[src]) {
+            return emojiMap[src];
+        }
+
+        // 2) Parse codepoints from URL filename: .../emoji/v2/svg/1f9e0.svg or 1f3f3-fe0f-200d-1f308.svg
+        const match = src.match(/\/emoji\/v2\/svg\/([0-9a-f-]+)\.svg/i);
+        if (!match) return null;
+
+        const codepoints = match[1]
+            .toLowerCase()
+            .split('-')
+            .filter(Boolean)
+            .map(hex => Number.parseInt(hex, 16));
+
+        if (codepoints.length === 0 || codepoints.some(n => !Number.isFinite(n))) return null;
+
+        try {
+            return String.fromCodePoint(...codepoints);
+        } catch {
+            return null;
+        }
+    }
+
+    function toEmojiTextOrMarkdown(imgEl) {
+        const alt = imgEl?.getAttribute?.('alt') || imgEl?.getAttribute?.('title') || '';
         const src = imgEl?.getAttribute?.('src') || '';
-        if (!src) return alt;
-        const mapped = emojiUrlToUnicode(src);
-        if (mapped) return mapped;
-        // Fallback when the emoji isn't in the map.
-        // Format: ![Alt Text|18](https://abs-0.twimg.com/emoji/v2/svg/xxxx.svg)
-        return `![${alt}|18](${src})`;
+
+        // Primary: generate Unicode directly from the Twitter emoji SVG URL.
+        const unicode = emojiUnicodeFromTwitterUrl(src);
+        if (unicode) return unicode;
+
+        // Secondary: Twitter often already provides the Unicode in `alt`.
+        if (alt) return alt;
+
+        // Fallback: keep the old markdown image representation.
+        if (!src) return 'emoji';
+        return `![emoji|18](${src})`;
     }
 
     function extractTweetTextWithEmojis(rootEl) {
@@ -71,7 +254,7 @@
                 const tag = (el.tagName || '').toUpperCase();
 
                 if (tag === 'IMG') {
-                    out.push(toEmojiMarkdown(el));
+                    out.push(toEmojiTextOrMarkdown(el));
                     return;
                 }
 
@@ -92,6 +275,9 @@
     function startScraping() {
         scrapedData = [];
         console.log(`Scraping started for ${profileHandle}'s replies page...`);
+        // Gate extraction until we hit the selected start tweet, if any.
+        hasReachedStartTweet = !startFromTweetId;
+        setUiStatus(startFromTweetId ? `Start tweet: ${startFromTweetId}` : 'Start tweet: (none)');
         scrollInterval = setInterval(() => {
             window.scrollBy(0, window.innerHeight * 0.8);
             extractTweets();
@@ -108,9 +294,15 @@
             }
 
             const tweetLinkElement = tweet.querySelector('a[href*="/status/"]');
-            const tweetId = tweetLinkElement?.href;
+            const tweetId = normalizeStatusUrl(tweetLinkElement?.href);
 
             if (!tweetId || scrapedData.some(t => t.id === tweetId)) return;
+
+            // If a start tweet was selected, skip everything until we reach it.
+            if (!hasReachedStartTweet && startFromTweetId) {
+                if (tweetId !== startFromTweetId) return;
+                hasReachedStartTweet = true;
+            }
 
             const tweetTextElement = tweet.querySelector('[data-testid="tweetText"]');
             const timeElement = tweet.querySelector('time');
@@ -133,6 +325,7 @@
                 id: tweetId,
                 authorName: tweet.querySelector('div[data-testid="User-Name"] a:not([tabindex="-1"]) span span')?.innerText || '',
                 authorHandle: tweet.querySelector('div[data-testid="User-Name"] a[tabindex="-1"] span')?.innerText || '',
+                authorAvatarUrl: extractAvatarUrl(tweet) || '',
                 // `innerText` drops emoji <img> nodes; walk the tweetText DOM to preserve them.
                 text: extractTweetTextWithEmojis(tweetTextElement) || '',
                 timestamp: timeElement?.getAttribute('datetime') || '',
@@ -448,7 +641,9 @@
         
         const hasRootLink = tweet.depth === 0;
         const dateLink = hasRootLink ? `[${formattedTimestamp}](${tweet.id})` : `[${formattedTimestamp}]`;
-        let content = `${indent}**${tweet.authorHandle}** ${dateLink}`;
+        const avatarMd = tweet.authorAvatarUrl ? `![|18](${tweet.authorAvatarUrl})` : '';
+        const safeHandle = escapeMarkdownInlineText(tweet.authorHandle);
+        let content = `${indent}${avatarMd}**${safeHandle}** ${dateLink}`;
 
         const textLines = stripYouTubeUrlsFromLines(tweet.text.split("\n"));
         if (textLines.length > 0 && textLines[0].trim()) {
@@ -503,6 +698,33 @@
     const uiContainer = document.createElement('div');
     uiContainer.style.cssText = 'position:fixed;top:10px;left:10px;z-index:9999;padding:8px;background:rgba(255, 255, 255, 0.9);border:1px solid #ccc;border-radius:6px;box-shadow:0 2px 5px rgba(0,0,0,0.2);display:flex;flex-direction:column;gap:5px;';
 
+    const statusLine = document.createElement('div');
+    statusLine.id = 'wxp-scraper-status';
+    statusLine.style.cssText = 'font:12px/1.3 system-ui, -apple-system, Segoe UI, Roboto, Arial;max-width:320px;color:#111;';
+    statusLine.textContent = 'Start tweet: (none)';
+    uiContainer.appendChild(statusLine);
+
+    const pickStartButton = document.createElement('button');
+    pickStartButton.textContent = 'Pick start tweet';
+    pickStartButton.style.cssText = 'padding:8px;background:#6b7280;color:white;border:none;border-radius:4px;cursor:pointer;';
+    pickStartButton.onclick = () => {
+        if (isPickingStartTweet) {
+            stopPickingMode();
+            return;
+        }
+        startPickingMode();
+    };
+    uiContainer.appendChild(pickStartButton);
+
+    const clearStartButton = document.createElement('button');
+    clearStartButton.textContent = 'Clear start tweet';
+    clearStartButton.style.cssText = 'padding:8px;background:#9ca3af;color:white;border:none;border-radius:4px;cursor:pointer;';
+    clearStartButton.onclick = () => {
+        stopPickingMode();
+        clearStartTweetSelection();
+    };
+    uiContainer.appendChild(clearStartButton);
+
     const startButton = document.createElement('button');
     startButton.textContent = 'Start Scraping';
     startButton.style.cssText = 'padding:8px;background:#1da1f2;color:white;border:none;border-radius:4px;cursor:pointer;';
@@ -516,4 +738,9 @@
     uiContainer.appendChild(stopButton);
 
     document.body.appendChild(uiContainer);
+
+    // Global picker listeners (capture so we can stop click navigation reliably)
+    document.addEventListener('mousemove', onPickerMouseMove, true);
+    document.addEventListener('click', onPickerClick, true);
+    document.addEventListener('keydown', onPickerKeyDown, true);
 })();
