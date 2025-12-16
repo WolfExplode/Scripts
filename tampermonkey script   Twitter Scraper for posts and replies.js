@@ -6,6 +6,7 @@
 // @author       WXP
 // @match        https://*.twitter.com/*/with_replies
 // @match        https://*.x.com/*/with_replies
+// @run-at       document-start
 // @grant        GM_getResourceText
 // @resource     EMOJI_MAP https://raw.githubusercontent.com/WolfExplode/Scripts/main/emoji-map.json
 // ==/UserScript==
@@ -21,15 +22,242 @@
 
     let emojiMapCache = null;
 
+    // --- Video interception (stable IDs; avoid blob URLs) ---
+    // Map tweet rest_id -> Set<filename.mp4>
+    const videoFilesByRestId = new Map();
+
+    function extractRestIdFromStatusUrl(statusUrl) {
+        // Works for:
+        // - https://x.com/user/status/123...
+        // - https://x.com/i/web/status/123...
+        if (!statusUrl) return '';
+        try {
+            const u = new URL(statusUrl, window.location.origin);
+            const m = u.pathname.match(/\/status\/(\d+)/);
+            return m?.[1] || '';
+        } catch {
+            const m = String(statusUrl).match(/\/status\/(\d+)/);
+            return m?.[1] || '';
+        }
+    }
+
+    function stripUrlQuery(urlString) {
+        try {
+            const u = new URL(urlString);
+            u.search = '';
+            u.hash = '';
+            return u.toString();
+        } catch {
+            return String(urlString || '').split('#')[0].split('?')[0];
+        }
+    }
+
+    function filenameFromUrl(urlString) {
+        const cleaned = stripUrlQuery(urlString);
+        try {
+            const u = new URL(cleaned);
+            const parts = (u.pathname || '').split('/').filter(Boolean);
+            return parts[parts.length - 1] || '';
+        } catch {
+            const parts = String(cleaned || '').split('/').filter(Boolean);
+            return parts[parts.length - 1] || '';
+        }
+    }
+
+    function pickBestMp4Variant(variants) {
+        if (!Array.isArray(variants)) return '';
+        let bestUrl = '';
+        let bestBitrate = -1;
+        for (const v of variants) {
+            if (!v || typeof v !== 'object') continue;
+            const ct = String(v.content_type || v.contentType || '').toLowerCase();
+            const url = String(v.url || '');
+            if (!url) continue;
+            if (ct && ct !== 'video/mp4') continue;
+            if (!/\.mp4(\?|$)/i.test(url)) continue;
+            const bitrate = Number(v.bitrate);
+            const score = Number.isFinite(bitrate) ? bitrate : 0;
+            if (score >= bestBitrate) {
+                bestBitrate = score;
+                bestUrl = url;
+            }
+        }
+        return bestUrl;
+    }
+
+    function harvestVideosFromTweetLikeObject(tweetObj) {
+        // Returns array of stable mp4 filenames for this tweet object, if present.
+        // X typically stores media under tweet.legacy.extended_entities.media[*].video_info.variants[*].url
+        const legacy = tweetObj?.legacy;
+        const medias =
+            legacy?.extended_entities?.media ||
+            legacy?.entities?.media ||
+            tweetObj?.extended_entities?.media ||
+            tweetObj?.entities?.media ||
+            null;
+
+        if (!Array.isArray(medias)) return [];
+
+        const out = new Set();
+        for (const m of medias) {
+            const vi = m?.video_info || m?.videoInfo;
+            const bestUrl = pickBestMp4Variant(vi?.variants);
+            if (!bestUrl) continue;
+            // Prefer truly stable CDN URLs.
+            if (!/https?:\/\/video\.twimg\.com\//i.test(bestUrl)) continue;
+            const name = filenameFromUrl(bestUrl);
+            if (name && /\.mp4$/i.test(name)) out.add(name);
+        }
+        return Array.from(out);
+    }
+
+    function mergeVideoFiles(restId, filenames) {
+        if (!restId || !Array.isArray(filenames) || filenames.length === 0) return;
+        let set = videoFilesByRestId.get(restId);
+        if (!set) {
+            set = new Set();
+            videoFilesByRestId.set(restId, set);
+        }
+        for (const f of filenames) {
+            if (f) set.add(f);
+        }
+    }
+
+    function scanGraphqlJsonForTweetVideos(json) {
+        // Walk the parsed JSON and find any objects shaped like a Tweet (has rest_id + legacy),
+        // then extract best MP4 variants and store them by rest_id.
+        const stack = [json];
+        let steps = 0;
+        const MAX_STEPS = 250000; // safety to avoid pathological payloads
+
+        while (stack.length > 0 && steps++ < MAX_STEPS) {
+            const node = stack.pop();
+            if (!node) continue;
+
+            if (Array.isArray(node)) {
+                for (let i = 0; i < node.length; i++) stack.push(node[i]);
+                continue;
+            }
+
+            if (typeof node === 'object') {
+                const restId = typeof node.rest_id === 'string' ? node.rest_id : '';
+                if (restId) {
+                    const videos = harvestVideosFromTweetLikeObject(node);
+                    if (videos.length > 0) mergeVideoFiles(restId, videos);
+                }
+
+                // Recurse into object props
+                for (const k of Object.keys(node)) {
+                    stack.push(node[k]);
+                }
+            }
+        }
+    }
+
+    function isLikelyTwitterGraphqlApiUrl(urlString) {
+        const u = String(urlString || '');
+        // Matches both:
+        // - https://x.com/i/api/graphql/<queryId>/<queryName>
+        // - https://x.com/graphql/<queryId>/<queryName>
+        return /\/(?:i\/api\/)?graphql\//i.test(u);
+    }
+
+    function tryProcessApiResponseText(urlString, responseText) {
+        try {
+            if (!isLikelyTwitterGraphqlApiUrl(urlString)) return;
+            if (!responseText || typeof responseText !== 'string') return;
+            // Fast reject to avoid parsing non-tweet payloads.
+            if (!responseText.includes('"rest_id"') || !responseText.includes('"video_info"')) return;
+            const json = JSON.parse(responseText);
+            scanGraphqlJsonForTweetVideos(json);
+        } catch {
+            // swallow: never break X UI if parsing fails
+        }
+    }
+
+    function installNetworkInterceptors() {
+        // XHR interception
+        try {
+            const origOpen = XMLHttpRequest.prototype.open;
+            const origSend = XMLHttpRequest.prototype.send;
+
+            XMLHttpRequest.prototype.open = function(method, url) {
+                try {
+                    this.__wxp_url = url;
+                } catch {
+                    // ignore
+                }
+                return origOpen.apply(this, arguments);
+            };
+
+            XMLHttpRequest.prototype.send = function() {
+                try {
+                    this.addEventListener('load', function() {
+                        try {
+                            if (this.status !== 200) return;
+                            const urlString = this.responseURL || this.__wxp_url || '';
+                            if (!isLikelyTwitterGraphqlApiUrl(urlString)) return;
+                            // responseType '' (text) and 'text' both expose responseText.
+                            const text = this.responseText;
+                            if (typeof text === 'string' && text) {
+                                tryProcessApiResponseText(urlString, text);
+                            }
+                        } catch {
+                            // ignore
+                        }
+                    });
+                } catch {
+                    // ignore
+                }
+                return origSend.apply(this, arguments);
+            };
+        } catch {
+            // ignore
+        }
+
+        // fetch interception
+        try {
+            const origFetch = window.fetch;
+            if (typeof origFetch === 'function') {
+                window.fetch = function(input, init) {
+                    const p = origFetch.apply(this, arguments);
+                    try {
+                        p.then(resp => {
+                            try {
+                                const urlString = resp?.url || (typeof input === 'string' ? input : input?.url) || '';
+                                if (!isLikelyTwitterGraphqlApiUrl(urlString)) return;
+                                if (!resp || !resp.ok) return;
+                                // Clone so we don't consume body.
+                                resp.clone().text().then(text => {
+                                    tryProcessApiResponseText(urlString, text);
+                                }).catch(() => {});
+                            } catch {
+                                // ignore
+                            }
+                        }).catch(() => {});
+                    } catch {
+                        // ignore
+                    }
+                    return p;
+                };
+            }
+        } catch {
+            // ignore
+        }
+    }
+
+    // Install interceptors ASAP (we also set @run-at document-start).
+    installNetworkInterceptors();
+
     // Scroll step (constant; avoids zoom-dependent viewport math)
-    const DEFAULT_SCROLL_STEP_PX = 2000;
+    const DEFAULT_SCROLL_STEP_PX = 500;
     const MIN_SCROLL_STEP_PX = 200;
     const MAX_SCROLL_STEP_PX = 6000;
     let scrollStepPx = DEFAULT_SCROLL_STEP_PX;
 
     // Page "zoom" (CSS zoom) to load more content per viewport during scraping.
     // Note: JS cannot change the browser's UI zoom level; this applies a CSS zoom to the page instead.
-    const SCRAPE_PAGE_ZOOM_PERCENT = 50;
+    const SCRAPE_PAGE_ZOOM_PERCENT = 60;
     const RESET_PAGE_ZOOM_PERCENT = 100;
     let appliedPageZoomTarget = null; // 'body' | 'root' | null
 
@@ -65,6 +293,12 @@
     let lastScrollY = 0;
     let lastScrollHeight = 0;
     const MAX_NO_NEW_TICKS = 16; // ~12s with 750ms interval
+    // Extra guard: if Twitter stops loading new timeline elements, stop quickly instead of "busy scrolling".
+    const TIMELINE_NO_NEW_ELEMENT_PAUSE_MS = 1100; // ~1s
+    const TIMELINE_LOAD_WAIT_MS = 10000; // wait up to 10s for Twitter to append more elements
+    let timelineObserver = null;
+    let lastTimelineNewElementMs = 0;
+    let lastTweetDomCount = 0;
 
     // Picker-mode state
     let isPickingStartTweet = false;
@@ -432,8 +666,62 @@
             clearInterval(scrollInterval);
             scrollInterval = null;
         }
+        if (timelineObserver) {
+            try { timelineObserver.disconnect(); } catch { /* ignore */ }
+            timelineObserver = null;
+        }
         if (reason) console.log(reason);
         setUiStatus(reason || 'Stopped.');
+    }
+
+    function markTimelineActivityNow() {
+        lastTimelineNewElementMs = Date.now();
+    }
+
+    function startTimelineObserver() {
+        if (timelineObserver) return;
+        // Initialize baseline
+        lastTweetDomCount = document.querySelectorAll('article[data-testid="tweet"]').length;
+        markTimelineActivityNow();
+
+        timelineObserver = new MutationObserver((mutations) => {
+            for (const m of mutations) {
+                const added = m.addedNodes;
+                if (!added || added.length === 0) continue;
+                for (let i = 0; i < added.length; i++) {
+                    const node = added[i];
+                    if (!node || node.nodeType !== 1) continue;
+                    const el = /** @type {Element} */ (node);
+                    // Fast path: the node itself is a tweet
+                    if (el.matches?.('article[data-testid="tweet"]')) {
+                        markTimelineActivityNow();
+                        return;
+                    }
+                    // Common path: tweet(s) inside a newly added subtree
+                    if (el.querySelector?.('article[data-testid="tweet"]')) {
+                        markTimelineActivityNow();
+                        return;
+                    }
+                }
+            }
+        });
+
+        try {
+            // Observe broadly; Twitter's container structure changes often.
+            timelineObserver.observe(document.body || document.documentElement, { childList: true, subtree: true });
+        } catch {
+            // ignore
+        }
+    }
+
+    async function waitForTimelineActivity(timeoutMs) {
+        const start = Date.now();
+        const baseline = lastTimelineNewElementMs;
+        while (Date.now() - start < Math.max(0, timeoutMs | 0)) {
+            if (lastTimelineNewElementMs !== baseline) return true;
+            await sleep(100);
+        }
+        return lastTimelineNewElementMs !== baseline;
     }
 
     function normalizeStatusUrl(url) {
@@ -585,6 +873,73 @@
         const style = bgEl?.getAttribute?.('style') || '';
         const match = style.match(/background-image:\s*url\(["']?([^"')]+)["']?\)/i);
         return match?.[1] || '';
+    }
+
+    function normalizeTwitterMediaFilenameFromUrl(urlString) {
+        // Accepts URLs like:
+        // - https://pbs.twimg.com/media/G74vDW1bEAAT6aD?format=jpg&name=small
+        // - https://pbs.twimg.com/media/G74vDW1bEAAT6aD.jpg
+        // Returns: "G74vDW1bEAAT6aD.jpg" (or png/webp/gif when detectable)
+        if (!urlString || typeof urlString !== 'string') return '';
+        if (!urlString.includes('pbs.twimg.com/media/')) return '';
+
+        try {
+            const u = new URL(urlString);
+            const pathParts = (u.pathname || '').split('/').filter(Boolean);
+            const last = pathParts[pathParts.length - 1] || '';
+            if (!last) return '';
+
+            let base = last;
+            let extFromPath = '';
+            const dotIdx = last.lastIndexOf('.');
+            if (dotIdx > 0 && dotIdx < last.length - 1) {
+                base = last.slice(0, dotIdx);
+                extFromPath = last.slice(dotIdx + 1);
+            }
+
+            // Twitter uses ?format=jpg|png|webp|gif on /media/ URLs.
+            let ext = (u.searchParams.get('format') || extFromPath || 'jpg').toLowerCase();
+            if (ext === 'jpeg') ext = 'jpg';
+            if (!['jpg', 'png', 'gif', 'webp'].includes(ext)) ext = 'jpg';
+
+            // Media IDs are usually URL-safe base64-ish / snowflake-ish strings, keep conservative.
+            if (!/^[a-z0-9_-]+$/i.test(base)) return '';
+
+            return `${base}.${ext}`;
+        } catch {
+            // Non-URL strings: best-effort regex.
+            const m = urlString.match(/pbs\.twimg\.com\/media\/([a-z0-9_-]+)(?:\.[a-z0-9]+)?(?:\?|$)/i);
+            if (!m) return '';
+            return `${m[1]}.jpg`;
+        }
+    }
+
+    function extractTweetPhotoFilenames(tweetEl) {
+        // Collect filenames that match how your downloader saves them (e.g. G74vDW1bEAAT6aD.jpg).
+        if (!tweetEl) return [];
+
+        const out = new Set();
+
+        // 1) Direct <img> tags (common).
+        tweetEl.querySelectorAll('img[src*="pbs.twimg.com/media/"]').forEach(img => {
+            const src = img.getAttribute('src') || '';
+            const filename = normalizeTwitterMediaFilenameFromUrl(src);
+            if (filename) out.add(filename);
+        });
+
+        // 2) Background-image styles (some layouts use this for photos).
+        tweetEl.querySelectorAll('[style*="pbs.twimg.com/media/"]').forEach(el => {
+            const style = el.getAttribute('style') || '';
+            const matches = style.match(/url\(["']?(https?:\/\/pbs\.twimg\.com\/media\/[^"')]+)["']?\)/gi) || [];
+            matches.forEach(m => {
+                const urlMatch = m.match(/url\(["']?([^"')]+)["']?\)/i);
+                const urlString = urlMatch?.[1] || '';
+                const filename = normalizeTwitterMediaFilenameFromUrl(urlString);
+                if (filename) out.add(filename);
+            });
+        });
+
+        return Array.from(out);
     }
 
     function getEmojiMap() {
@@ -822,6 +1177,7 @@
         scrapedData = [];
         scrapedIdSet = new Set();
         translationDeferById = new Map();
+        startTimelineObserver();
         console.log(`Scraping started for ${profileHandle}'s replies page...`);
         // Gate extraction until we hit the selected start tweet, if any.
         hasReachedStartTweet = !startFromTweetId;
@@ -856,10 +1212,17 @@
                 const afterCount = scrapedData.length;
                 const afterY = window.scrollY;
                 const afterH = document.documentElement.scrollHeight;
+                const tweetDomCountNow = document.querySelectorAll('article[data-testid="tweet"]').length;
 
                 const didAddAny = afterCount > beforeCount;
                 const didScroll = afterY !== beforeY;
                 const didGrow = afterH !== beforeH;
+
+                if (didGrow) markTimelineActivityNow();
+                if (tweetDomCountNow > lastTweetDomCount) {
+                    lastTweetDomCount = tweetDomCountNow;
+                    markTimelineActivityNow();
+                }
 
                 if (didAddAny) {
                     consecutiveNoNewTicks = 0;
@@ -880,11 +1243,27 @@
 
                     const endVisible = isEndOfTimelineVisible();
                     const stalledScroll = !didScroll && !didGrow && afterY === lastScrollY && afterH === lastScrollHeight;
+                    const noNewTimelineElsRecently = (Date.now() - lastTimelineNewElementMs) >= TIMELINE_NO_NEW_ELEMENT_PAUSE_MS;
 
                     if (endVisible && consecutiveNoNewTicks >= 4) {
                         stopScrapingInterval(`Auto-stopped: end of timeline detected (tweets: ${afterCount}).`);
                         if (autoDownloadOnAutoStop) stopAndDownload();
                         return;
+                    }
+
+                    // If Twitter isn't loading new tweet DOM nodes, PAUSE and give it a chance to load more.
+                    // Only stop+download if it stays stuck for the full wait window.
+                    if (stalledScroll && consecutiveNoNewTicks >= 2 && noNewTimelineElsRecently) {
+                        setUiStatus(`Paused: waiting for Twitter to load more… (up to ${Math.round(TIMELINE_LOAD_WAIT_MS / 1000)}s)`);
+                        const didLoad = await waitForTimelineActivity(TIMELINE_LOAD_WAIT_MS);
+                        if (didLoad) {
+                            // Give the next tick a clean slate.
+                            consecutiveNoNewTicks = 0;
+                        } else {
+                            stopScrapingInterval(`Auto-stopped: no new timeline elements loaded in ${Math.round(TIMELINE_LOAD_WAIT_MS / 1000)}s (tweets: ${afterCount}).`);
+                            if (autoDownloadOnAutoStop) stopAndDownload();
+                            return;
+                        }
                     }
 
                     if (consecutiveNoNewTicks >= MAX_NO_NEW_TICKS && stalledScroll) {
@@ -953,6 +1332,13 @@
                 authorName: tweet.querySelector('div[data-testid="User-Name"] a:not([tabindex="-1"]) span span')?.innerText || '',
                 authorHandle: tweet.querySelector('div[data-testid="User-Name"] a[tabindex="-1"] span')?.innerText || '',
                 authorAvatarUrl: extractAvatarUrl(tweet) || '',
+                photoFiles: extractTweetPhotoFilenames(tweet),
+                videoFiles: (() => {
+                    const restId = extractRestIdFromStatusUrl(tweetId);
+                    if (!restId) return [];
+                    const set = videoFilesByRestId.get(restId);
+                    return set ? Array.from(set) : [];
+                })(),
                 // `innerText` drops emoji <img> nodes; walk the tweetText DOM to preserve them.
                 text: extractTweetTextWithEmojis(tweetTextElement) || '',
                 timestamp: timeElement?.getAttribute('datetime') || '',
@@ -1311,6 +1697,29 @@
 
             if (renderedLines.length > 0) {
                 content += "\n" + renderedLines.join("\n");
+            }
+        }
+
+        // Append Obsidian image embeds for downloaded media filenames (safe even if file isn't present yet).
+        // Example: ![[G74vDW1bEAAT6aD.jpg|400]]
+        if (Array.isArray(tweet.photoFiles) && tweet.photoFiles.length > 0) {
+            const width = 400;
+            const embeds = tweet.photoFiles
+                .filter(Boolean)
+                .map(name => `${indent}![[${name}|${width}]]`);
+            if (embeds.length > 0) {
+                content += "\n" + embeds.join("\n");
+            }
+        }
+
+        // Append Obsidian video embeds (stable filenames derived from video.twimg.com URLs).
+        // Example: ![[Uh8iwW-Dw2JmvwBF.mp4|vid-20]]
+        if (Array.isArray(tweet.videoFiles) && tweet.videoFiles.length > 0) {
+            const embeds = tweet.videoFiles
+                .filter(Boolean)
+                .map(name => `${indent}![[${name}|vid-20]]`);
+            if (embeds.length > 0) {
+                content += "\n" + embeds.join("\n");
             }
         }
 
