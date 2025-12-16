@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Twitter Scraper for /with_replies
 // @namespace    http://tampermonkey.net/
-// @version      0.1.5
+// @version      0.1.8
 // @description  Scrapes Twitter /with_replies. Make sure to install the MediaHarvest extension to download the videos. Disable “Ask where to save each file” in your browser settings.
 // @author       WXP
 // @match        https://*.twitter.com/*/with_replies
@@ -1067,6 +1067,72 @@
         return match?.[1] || '';
     }
 
+    function normalizeAvatarUrlTo200x200(urlString) {
+        // X often renders e.g. ".../P__Vdz3r_bigger.jpg" in the DOM.
+        // A 200x200 variant typically exists at ".../P__Vdz3r_200x200.jpg".
+        // This keeps the same path/extension/query but swaps the size suffix.
+        const raw = String(urlString || '').trim();
+        if (!raw) return '';
+        try {
+            const u = new URL(raw);
+            const path = u.pathname || '';
+            const newPath = path.replace(
+                /\/([^\/]+?)(?:_(?:normal|bigger|mini|400x400|200x200))?(\.[a-z0-9]+)$/i,
+                (_m, base, ext) => `/${base}_200x200${ext}`
+            );
+            u.pathname = newPath;
+            return u.toString();
+        } catch {
+            return raw.replace(
+                /\/([^\/]+?)(?:_(?:normal|bigger|mini|400x400|200x200))?(\.[a-z0-9]+)(\?.*)?$/i,
+                (_m, base, ext, q) => `/${base}_200x200${ext}${q || ''}`
+            );
+        }
+    }
+
+    function sanitizeFilenameComponent(s) {
+        // Windows-safe filename component: remove reserved characters and trim.
+        return String(s || '')
+            .replace(/[<>:"/\\|?*\u0000-\u001F]/g, '_')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .slice(0, 180);
+    }
+
+    function avatarFilenameFromUrlAndHandle(avatarUrl, authorHandle) {
+        // Example avatar URL:
+        // https://pbs.twimg.com/profile_images/1950538056639094785/P__Vdz3r_200x200.jpg
+        // -> avatar_ayamehtbt_P__Vdz3r_200x200.jpg
+        if (!avatarUrl) return '';
+        const handleRaw = String(authorHandle || '').replace(/^@/, '');
+        const handle = sanitizeFilenameComponent(handleRaw || 'user');
+
+        let baseName = '';
+        let ext = 'jpg';
+        try {
+            const u = new URL(avatarUrl);
+            const parts = (u.pathname || '').split('/').filter(Boolean);
+            baseName = parts[parts.length - 1] || '';
+        } catch {
+            const parts = String(avatarUrl).split('/').filter(Boolean);
+            baseName = parts[parts.length - 1] || '';
+        }
+
+        // Strip query/hash and extract extension.
+        baseName = baseName.split('?')[0].split('#')[0];
+        const dot = baseName.lastIndexOf('.');
+        if (dot > 0 && dot < baseName.length - 1) {
+            ext = baseName.slice(dot + 1).toLowerCase() || 'jpg';
+            baseName = baseName.slice(0, dot);
+        }
+        if (ext === 'jpeg') ext = 'jpg';
+        if (!['jpg', 'png', 'webp', 'gif'].includes(ext)) ext = 'jpg';
+
+        const safeBase = sanitizeFilenameComponent(baseName || 'avatar');
+        const filename = `avatar_${handle}_${safeBase}.${ext}`;
+        return filename;
+    }
+
     function normalizeTwitterMediaFilenameFromUrl(urlString) {
         // Accepts URLs like:
         // - https://pbs.twimg.com/media/G74vDW1bEAAT6aD?format=jpg&name=small
@@ -1558,7 +1624,8 @@
                 id: tweetId,
                 authorName: tweet.querySelector('div[data-testid="User-Name"] a:not([tabindex="-1"]) span span')?.innerText || '',
                 authorHandle: tweet.querySelector('div[data-testid="User-Name"] a[tabindex="-1"] span')?.innerText || '',
-                authorAvatarUrl: extractAvatarUrl(tweet) || '',
+                authorAvatarUrl: normalizeAvatarUrlTo200x200(extractAvatarUrl(tweet) || ''),
+                authorAvatarFile: '', // computed below
                 photoFiles: extractTweetPhotoFilenames(tweet),
                 videoFiles: (() => {
                     const restId = extractRestIdFromStatusUrl(tweetId);
@@ -1577,6 +1644,9 @@
                 hasReplies: hasReplies,
                 replies: [] // For compatibility; will be rebuilt during processing
             };
+
+            // Determine a stable local avatar filename for markdown linking + export list.
+            tweetData.authorAvatarFile = avatarFilenameFromUrlAndHandle(tweetData.authorAvatarUrl, tweetData.authorHandle);
 
             // If this tweet was detected as a voice post, store its URL for yt-dlp export.
             if (tweetData.isVoicePost) {
@@ -1699,13 +1769,27 @@
         generateMarkdown(finalSequence, `${account}_with_replies.md`);
 
         // Export yt-dlp batch files for voice posts (tweet URL is the best input).
-        // NOTE: A userscript cannot execute yt-dlp locally, so we generate a script you can run in PowerShell.
+        // NOTE: A userscript cannot execute yt-dlp locally, so we export a URL list + a combined downloader script.
         if (exportVoiceYtDlp) {
             try {
-                exportVoiceYtDlpBatchFiles(scrapedData, account);
+                exportVoiceTweetUrlListFile(scrapedData, account);
             } catch {
                 // ignore: do not block markdown export
             }
+        }
+
+        // Export avatar download lists so markdown can link avatars locally.
+        try {
+            exportAvatarDownloadFiles(scrapedData, account);
+        } catch {
+            // ignore: do not block markdown export
+        }
+
+        // Single combined downloader for avatars + voice (replaces separate *_download.cmd/ps1 files).
+        try {
+            exportCombinedDownloadMediaRunner(account);
+        } catch {
+            // ignore: do not block markdown export
         }
 
         // Restore zoom after we're done (especially helpful if you keep browsing after download).
@@ -1725,81 +1809,154 @@
         return Array.from(out);
     }
 
-    function exportVoiceYtDlpBatchFiles(allTweets, accountName) {
+    function exportVoiceTweetUrlListFile(allTweets, accountName) {
         const urls = collectUniqueVoiceTweetUrlsFromScrapedData(allTweets);
         if (!urls || urls.length === 0) return;
 
         const safeAccount = String(accountName || 'account').replace(/[^a-z0-9_-]/gi, '_');
         const listFilename = `${safeAccount}_voice_tweets.txt`;
-        const ps1Filename = `${safeAccount}_voice_ytdlp.ps1`;
-        const cmdFilename = `${safeAccount}_voice_ytdlp.cmd`;
 
         const listContent = urls.join('\n') + '\n';
 
-        // PowerShell script: extracts tweet status ID and forces a deterministic m4a filename.
-        // You can tweak $CookiesBrowser to 'chrome', 'edge', etc.
-        const cookiesBrowser = String(ytDlpCookiesBrowser || DEFAULT_YTDLP_COOKIES_BROWSER).trim() || DEFAULT_YTDLP_COOKIES_BROWSER;
-        const ps1 = [
-            '# Generated by Twitter Scraper for /with_replies (Tampermonkey)',
-            '# Purpose: download Voice posts via yt-dlp using the tweet URL (works even when extensions fail).',
-            '',
-            '$ErrorActionPreference = "Stop"',
-            `$CookiesBrowser = "${cookiesBrowser.replace(/"/g, '""')}"`,
-            `$ListPath = Join-Path $PSScriptRoot "${listFilename.replace(/"/g, '""')}"`,
-            '',
-            'if (-not (Test-Path $ListPath)) {',
-            '  throw "Missing URL list: $ListPath"',
-            '}',
-            '',
-            '$urls = Get-Content -LiteralPath $ListPath | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }',
-            'if ($urls.Count -eq 0) {',
-            '  Write-Host "No URLs found in list."',
-            '  exit 0',
-            '}',
-            '',
-            'foreach ($u in $urls) {',
-            '  $m = [regex]::Match($u, "/status/(?<id>\\d+)")',
-            '  if (-not $m.Success) {',
-            '    Write-Warning ("Skipping (no status id): " + $u)',
-            '    continue',
-            '  }',
-            '  $id = $m.Groups["id"].Value',
-            '  $out = ("voice_" + $id + ".%(ext)s")',
-            '  Write-Host ("Downloading voice tweet " + $id + " ...")',
-            '  yt-dlp --cookies-from-browser $CookiesBrowser -x --audio-format m4a --no-overwrites --continue -o $out $u',
-            '}',
-            ''
-        ].join('\r\n');
+        downloadTextFile(listContent, listFilename);
+    }
 
-        // CMD script: simpler, uses yt-dlp templates (may not always match tweet id); PS1 is preferred.
-        const cmd = [
+    function collectUniqueAvatarDownloads(allTweets) {
+        // Returns array of { handle, url, file } with unique (handle+url).
+        const out = [];
+        const seen = new Set();
+        for (const t of (allTweets || [])) {
+            const handle = String(t?.authorHandle || '').trim();
+            const url = String(t?.authorAvatarUrl || '').trim();
+            const file = String(t?.authorAvatarFile || '').trim();
+            if (!handle || !url || !file) continue;
+            const key = `${handle}\n${url}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            out.push({ handle, url, file });
+        }
+        return out;
+    }
+
+    function exportAvatarDownloadFiles(allTweets, accountName) {
+        const rows = collectUniqueAvatarDownloads(allTweets);
+        if (!rows || rows.length === 0) return;
+
+        const safeAccount = String(accountName || 'account').replace(/[^a-z0-9_-]/gi, '_');
+        const tsvFilename = `${safeAccount}_avatars.tsv`;
+
+        // TSV: handle \t url \t file
+        const tsv = [
+            '# handle\tavatarUrl\tlocalFile',
+            ...rows.map(r => `${r.handle}\t${r.url}\t${r.file}`)
+        ].join('\r\n') + '\r\n';
+
+        downloadTextFile(tsv, tsvFilename);
+    }
+
+    function exportCombinedDownloadMediaRunner(accountName) {
+        const safeAccount = String(accountName || 'account').replace(/[^a-z0-9_-]/gi, '_');
+        const filename = `${safeAccount}_download_media.cmd`;
+
+        const cookiesBrowser = String(ytDlpCookiesBrowser || DEFAULT_YTDLP_COOKIES_BROWSER).trim() || DEFAULT_YTDLP_COOKIES_BROWSER;
+        const avatarTsv = `${safeAccount}_avatars.tsv`;
+        const voiceList = `${safeAccount}_voice_tweets.txt`;
+
+        // Hybrid .cmd -> extracts embedded PowerShell payload to a temp .ps1, then runs it.
+        // This avoids "polyglot" tricks that don't reliably execute under cmd.exe.
+        const content = [
             '@echo off',
             'setlocal EnableExtensions EnableDelayedExpansion',
-            'REM Generated by Twitter Scraper for /with_replies (Tampermonkey)',
-            'REM Purpose: download Voice posts via yt-dlp using the tweet URL.',
-            '',
-            `set "COOKIES_BROWSER=${cookiesBrowser.replace(/"/g, '')}"`,
-            `set "LIST=${listFilename}"`,
-            '',
-            'if not exist "%LIST%" (',
-            '  echo Missing URL list: %LIST%',
+            'set "WXP_ROOT=%~dp0"',
+            'set "SELF=%~f0"',
+            'set "TMP=%TEMP%\\%~n0_%RANDOM%.ps1"',
+            'for /f "delims=:" %%A in (\'findstr /n "^:POWERSHELL_PAYLOAD$" "%SELF%"\') do set "LINE=%%A"',
+            'if not defined LINE (',
+            '  echo ERROR: POWERSHELL payload marker not found.',
             '  exit /b 1',
             ')',
+            'set /a SKIP=LINE',
+            'more +%SKIP% "%SELF%" > "%TMP%"',
+            'pwsh -NoProfile -ExecutionPolicy Bypass -File "%TMP%" %*',
+            'set "EC=%ERRORLEVEL%"',
+            'del "%TMP%" >nul 2>nul',
+            'exit /b %EC%',
+            ':POWERSHELL_PAYLOAD',
             '',
-            'for /f "usebackq delims=" %%U in ("%LIST%") do (',
-            '  set "U=%%U"',
-            '  if not "!U!"=="" (',
-            '    yt-dlp --cookies-from-browser "%COOKIES_BROWSER%" -x --audio-format m4a --no-overwrites --continue -o "voice_%(id)s.%(ext)s" "!U!"',
-            '  )',
-            ')',
+            '# Generated by Twitter Scraper for /with_replies (Tampermonkey)',
+            '# Purpose: download media after scraping (avatars + voice posts).',
             '',
-            'endlocal',
+            '$ErrorActionPreference = "Continue"',
+            `$CookiesBrowser = "${cookiesBrowser.replace(/"/g, '""')}"`,
+            '$Root = $env:WXP_ROOT',
+            'if (-not $Root) { $Root = Split-Path -Parent $MyInvocation.MyCommand.Path }',
+            '$Root = ($Root | ForEach-Object { $_.ToString().TrimEnd("\\") })',
+            `$AvatarTsv = Join-Path $Root "${avatarTsv.replace(/"/g, '""')}"`,
+            `$VoiceList = Join-Path $Root "${voiceList.replace(/"/g, '""')}"`,
+            '$AvatarOutDir = Join-Path $Root "avatars"',
+            '',
+            'Write-Host "== Download media =="',
+            'Write-Host ("Root: " + $Root)',
+            'Write-Host ("Cookies browser: " + $CookiesBrowser)',
+            'Write-Host ""',
+            '',
+            '## Avatars',
+            'if (Test-Path $AvatarTsv) {',
+            '  New-Item -ItemType Directory -Force -Path $AvatarOutDir | Out-Null',
+            '  $lines = Get-Content -LiteralPath $AvatarTsv',
+            '  foreach ($line in $lines) {',
+            '    if (-not $line) { continue }',
+            '    if ($line.TrimStart().StartsWith("#")) { continue }',
+            '    $parts = $line -split "`t"',
+            '    if ($parts.Count -lt 3) { continue }',
+            '    $handle = $parts[0].Trim()',
+            '    $url = $parts[1].Trim()',
+            '    $file = $parts[2].Trim()',
+            '    if (-not $url -or -not $file) { continue }',
+            '    $leaf = Split-Path -Leaf ($file -replace "/", "\\")',
+            '    $outPath = Join-Path $AvatarOutDir $leaf',
+            '    if (Test-Path $outPath) { continue }',
+            '    try {',
+            '      Write-Host ("[avatar] " + $handle + " -> " + $leaf)',
+            '      Invoke-WebRequest -Uri $url -OutFile $outPath',
+            '    } catch {',
+            '      Write-Warning ("[avatar] Failed: " + $handle + " " + $url)',
+            '    }',
+            '  }',
+            '} else {',
+            '  Write-Host ("No avatar TSV found: " + $AvatarTsv)',
+            '}',
+            '',
+            '## Voice posts (yt-dlp)',
+            'if (Test-Path $VoiceList) {',
+            '  $urls = Get-Content -LiteralPath $VoiceList | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }',
+            '  if ($urls.Count -gt 0) {',
+            '    foreach ($u in $urls) {',
+            '      $m = [regex]::Match($u, "/status/(?<id>\\d+)")',
+            '      if (-not $m.Success) {',
+            '        Write-Warning ("[voice] Skipping (no status id): " + $u)',
+            '        continue',
+            '      }',
+            '      $id = $m.Groups["id"].Value',
+            '      $out = ("voice_" + $id + ".%(ext)s")',
+            '      Write-Host ("[voice] " + $id)',
+            '      try {',
+            '        yt-dlp --cookies-from-browser $CookiesBrowser -x --audio-format m4a --no-overwrites --continue -o $out $u',
+            '      } catch {',
+            '        Write-Warning ("[voice] yt-dlp failed for: " + $u)',
+            '      }',
+            '    }',
+            '  }',
+            '} else {',
+            '  Write-Host ("No voice list found: " + $VoiceList)',
+            '}',
+            '',
+            'Write-Host ""',
+            'Write-Host "Done."',
             ''
         ].join('\r\n');
 
-        downloadTextFile(listContent, listFilename);
-        downloadTextFile(ps1, ps1Filename);
-        downloadTextFile(cmd, cmdFilename);
+        downloadTextFile(content, filename);
     }
 
     function downloadTextFile(content, filename) {
@@ -2033,7 +2190,9 @@
         
         const hasRootLink = tweet.depth === 0;
         const dateLink = hasRootLink ? `[${formattedTimestamp}](${tweet.id})` : `[${formattedTimestamp}]`;
-        const avatarMd = tweet.authorAvatarUrl ? `![|18](${tweet.authorAvatarUrl})` : '';
+        // Prefer local avatar embeds (portable vault). If the file isn't downloaded yet, Obsidian will show a missing embed.
+        // We still fall back to remote URL if local filename isn't available for any reason.
+        const avatarMd = tweet.authorAvatarFile ? `![[${tweet.authorAvatarFile}|18]]` : (tweet.authorAvatarUrl ? `![|18](${tweet.authorAvatarUrl})` : '');
         const safeHandle = escapeMarkdownInlineText(tweet.authorHandle);
         let content = `${indent}${avatarMd}**${safeHandle}** ${dateLink}`;
 
@@ -2183,7 +2342,7 @@
         saveVoiceExportSettings();
     };
     exportVoiceRow.appendChild(exportVoiceCb);
-    exportVoiceRow.appendChild(document.createTextNode('Export voice yt-dlp batch files'));
+    exportVoiceRow.appendChild(document.createTextNode('generate a list of media that requires manual download'));
     uiContainer.appendChild(exportVoiceRow);
 
     const cookiesRow = document.createElement('label');
