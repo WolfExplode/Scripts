@@ -1,13 +1,14 @@
 // ==UserScript==
 // @name         Twitter Scraper for /with_replies
 // @namespace    http://tampermonkey.net/
-// @version      0.1.3
-// @description  Scrapes Twitter /with_replies page with conversation-aware sorting
+// @version      0.1.5
+// @description  Scrapes Twitter /with_replies. Make sure to install the MediaHarvest extension to download the videos. Disable “Ask where to save each file” in your browser settings.
 // @author       WXP
 // @match        https://*.twitter.com/*/with_replies
 // @match        https://*.x.com/*/with_replies
 // @run-at       document-start
 // @grant        GM_getResourceText
+// @grant        GM_download
 // @resource     EMOJI_MAP https://raw.githubusercontent.com/WolfExplode/Scripts/main/emoji-map.json
 // ==/UserScript==
 
@@ -25,6 +26,10 @@
     // --- Video interception (stable IDs; avoid blob URLs) ---
     // Map tweet rest_id -> Set<filename.mp4>
     const videoFilesByRestId = new Map();
+    // Map tweet rest_id -> Set<tweetUrl> (voice posts are best downloaded via yt-dlp using the tweet URL)
+    const voiceTweetUrlsByRestId = new Map();
+    // Map tweet rest_id -> boolean (detected voice media)
+    const voiceDetectedByRestId = new Map();
 
     function extractRestIdFromStatusUrl(statusUrl) {
         // Works for:
@@ -85,6 +90,28 @@
         return bestUrl;
     }
 
+    function harvestVoiceSignalsFromMediaObject(mediaObj) {
+        // Best-effort detection for "voice posts" (audio notes) in GraphQL tweet media.
+        // We mark voice if we see:
+        // - explicit media type "audio"
+        // - any variant content_type starting with "audio/"
+        // - fields like audio_info / voice_info (names may change, so be permissive)
+        const t = String(mediaObj?.type || '').toLowerCase();
+        if (t === 'audio' || t === 'voice') return true;
+
+        if (mediaObj?.audio_info || mediaObj?.audioInfo || mediaObj?.voice_info || mediaObj?.voiceInfo) return true;
+
+        const vi = mediaObj?.video_info || mediaObj?.videoInfo;
+        const variants = vi?.variants;
+        if (Array.isArray(variants)) {
+            for (const v of variants) {
+                const ct = String(v?.content_type || v?.contentType || '').toLowerCase();
+                if (ct.startsWith('audio/')) return true;
+            }
+        }
+        return false;
+    }
+
     function harvestVideosFromTweetLikeObject(tweetObj) {
         // Returns array of stable mp4 filenames for this tweet object, if present.
         // X typically stores media under tweet.legacy.extended_entities.media[*].video_info.variants[*].url
@@ -99,7 +126,9 @@
         if (!Array.isArray(medias)) return [];
 
         const out = new Set();
+        let sawVoice = false;
         for (const m of medias) {
+            if (!sawVoice && harvestVoiceSignalsFromMediaObject(m)) sawVoice = true;
             const vi = m?.video_info || m?.videoInfo;
             const bestUrl = pickBestMp4Variant(vi?.variants);
             if (!bestUrl) continue;
@@ -107,6 +136,11 @@
             if (!/https?:\/\/video\.twimg\.com\//i.test(bestUrl)) continue;
             const name = filenameFromUrl(bestUrl);
             if (name && /\.mp4$/i.test(name)) out.add(name);
+        }
+        // Stash a voice-detected flag (merged by rest_id in the caller).
+        // (We cannot reliably download voice posts in-browser, but we can export tweet URLs for yt-dlp.)
+        if (tweetObj?.rest_id && typeof tweetObj.rest_id === 'string' && sawVoice) {
+            voiceDetectedByRestId.set(tweetObj.rest_id, true);
         }
         return Array.from(out);
     }
@@ -257,7 +291,7 @@
 
     // Page "zoom" (CSS zoom) to load more content per viewport during scraping.
     // Note: JS cannot change the browser's UI zoom level; this applies a CSS zoom to the page instead.
-    const SCRAPE_PAGE_ZOOM_PERCENT = 70;
+    const SCRAPE_PAGE_ZOOM_PERCENT = 100;
     const RESET_PAGE_ZOOM_PERCENT = 100;
     let appliedPageZoomTarget = null; // 'body' | 'root' | null
 
@@ -327,7 +361,9 @@
         scrollStepPx: 'wxp_tw_scraper_scroll_step_px',
         waitForImmersiveTranslate: 'wxp_tw_scraper_wait_for_immersive_translate',
         translationWaitMs: 'wxp_tw_scraper_translation_wait_ms',
-        autoHarvestWithExtension: 'wxp_tw_scraper_auto_harvest_with_extension'
+        autoHarvestWithExtension: 'wxp_tw_scraper_auto_harvest_with_extension',
+        exportVoiceYtDlp: 'wxp_tw_scraper_export_voice_ytdlp',
+        ytDlpCookiesBrowser: 'wxp_tw_scraper_ytdlp_cookies_browser'
     };
 
     // Optional: drive the TwitterMediaHarvest extension by auto-clicking its injected button.
@@ -340,6 +376,12 @@
     let lastHarvestClickMs = 0;
     const HARVEST_PUMP_MS = 500;
     const HARVEST_MIN_INTERVAL_MS = 900; // throttle clicks to avoid hammering UI
+
+    // Voice download export (yt-dlp batch)
+    const DEFAULT_EXPORT_VOICE_YTDLP = true;
+    let exportVoiceYtDlp = DEFAULT_EXPORT_VOICE_YTDLP;
+    const DEFAULT_YTDLP_COOKIES_BROWSER = 'firefox';
+    let ytDlpCookiesBrowser = DEFAULT_YTDLP_COOKIES_BROWSER;
 
     function loadAutoHarvestWithExtensionSetting() {
         try {
@@ -354,6 +396,27 @@
     function saveAutoHarvestWithExtensionSetting() {
         try {
             localStorage.setItem(STORAGE_KEYS.autoHarvestWithExtension, autoHarvestWithExtension ? '1' : '0');
+        } catch {
+            // ignore
+        }
+    }
+
+    function loadVoiceExportSettings() {
+        try {
+            const raw = localStorage.getItem(STORAGE_KEYS.exportVoiceYtDlp);
+            if (raw != null && raw !== '') exportVoiceYtDlp = raw === '1' || raw === 'true';
+        } catch { /* ignore */ }
+
+        try {
+            const raw = localStorage.getItem(STORAGE_KEYS.ytDlpCookiesBrowser);
+            if (raw != null && raw.trim()) ytDlpCookiesBrowser = String(raw).trim();
+        } catch { /* ignore */ }
+    }
+
+    function saveVoiceExportSettings() {
+        try {
+            localStorage.setItem(STORAGE_KEYS.exportVoiceYtDlp, exportVoiceYtDlp ? '1' : '0');
+            localStorage.setItem(STORAGE_KEYS.ytDlpCookiesBrowser, String(ytDlpCookiesBrowser || '').trim() || DEFAULT_YTDLP_COOKIES_BROWSER);
         } catch {
             // ignore
         }
@@ -393,7 +456,7 @@
         // Heuristic: tweetPhoto contains photos *and* video containers in current X DOM.
         // Also check for video player markers.
         return !!tweetEl.querySelector(
-            'img[src*="pbs.twimg.com/media/"], [data-testid="tweetPhoto"], [data-testid="videoPlayer"], [data-testid="videoComponent"], video'
+            'img[src*="pbs.twimg.com/media/"], [data-testid="tweetPhoto"], [data-testid="videoPlayer"], [data-testid="videoComponent"], video, [data-testid*="audio"], audio, [aria-label*="voice"], [aria-label*="audio"]'
         );
     }
 
@@ -1308,6 +1371,8 @@
         translationDeferById = new Map();
         startTimelineObserver();
         console.log(`Scraping started for ${profileHandle}'s replies page...`);
+        // Reset per-run voice URL collection
+        voiceTweetUrlsByRestId.clear();
         // Gate extraction until we hit the selected start tweet, if any.
         hasReachedStartTweet = !startFromTweetId;
         setUiStatus(formatStartTweetStatus());
@@ -1414,6 +1479,37 @@
         const tweetElements = document.querySelectorAll('article[data-testid="tweet"]');
         let deferredCount = 0;
 
+        function tweetHasReplyingToBanner(tweetEl) {
+            // Some replies (e.g. replying to a deleted/suspended account) do not show the usual
+            // "vertical reply line" marker in the left gutter, but *do* render a banner like:
+            //   "Replying to @suspendedaccount"
+            // We treat that as a reliable reply signal.
+            if (!tweetEl) return false;
+
+            // Scan small-ish set of nodes; keep it cheap but robust to X DOM churn.
+            const nodes = tweetEl.querySelectorAll('div, span');
+            for (let i = 0; i < nodes.length; i++) {
+                const el = nodes[i];
+                if (!el) continue;
+
+                // Avoid matching inside the tweet body itself (someone could literally type "Replying to ...").
+                if (el.closest?.('[data-testid="tweetText"]')) continue;
+
+                const text = (el.textContent || '').trim();
+                if (!text) continue;
+                if (!/^replying to\b/i.test(text)) continue;
+
+                // Ensure we actually see a handle somewhere in the banner (linked or plain text).
+                const hasHandle =
+                    /@[A-Za-z0-9_]{1,15}/.test(text) ||
+                    /@[A-Za-z0-9_]{1,15}/.test((el.innerText || '').trim());
+                if (!hasHandle) continue;
+
+                return true;
+            }
+            return false;
+        }
+
         tweetElements.forEach(tweet => {
             const socialContext = tweet.querySelector('[data-testid="socialContext"]');
             if (socialContext && /repost/i.test(socialContext.innerText)) {
@@ -1443,10 +1539,12 @@
             }
 
             // Check for reply indicator (vertical line on left side)
-            const isReply = !!tweet.querySelector(
+            const hasVerticalReplyLine = !!tweet.querySelector(
                 'div.css-175oi2r.r-18kxxzh.r-1wron08.r-onrtq4.r-15zivkp > ' +
                 'div.css-175oi2r.r-1bnu78o.r-f8sm7e.r-m5arl1.r-1p0dtai.r-1d2f490.r-u8s1d.r-zchlnj.r-ipm5af'
             );
+            // Fallback: banner text ("Replying to @...") which appears even when the replied-to tweet is missing.
+            const isReply = hasVerticalReplyLine || tweetHasReplyingToBanner(tweet);
 
             const statsGroup = tweet.querySelector('div[role="group"][aria-label]');
             let hasReplies = false;
@@ -1468,6 +1566,10 @@
                     const set = videoFilesByRestId.get(restId);
                     return set ? Array.from(set) : [];
                 })(),
+                isVoicePost: (() => {
+                    const restId = extractRestIdFromStatusUrl(tweetId);
+                    return !!(restId && voiceDetectedByRestId.get(restId));
+                })(),
                 // `innerText` drops emoji <img> nodes; walk the tweetText DOM to preserve them.
                 text: extractTweetTextWithEmojis(tweetTextElement) || '',
                 timestamp: timeElement?.getAttribute('datetime') || '',
@@ -1475,6 +1577,16 @@
                 hasReplies: hasReplies,
                 replies: [] // For compatibility; will be rebuilt during processing
             };
+
+            // If this tweet was detected as a voice post, store its URL for yt-dlp export.
+            if (tweetData.isVoicePost) {
+                const restId = extractRestIdFromStatusUrl(tweetId);
+                if (restId) {
+                    let set = voiceTweetUrlsByRestId.get(restId);
+                    if (!set) { set = new Set(); voiceTweetUrlsByRestId.set(restId, set); }
+                    set.add(tweetId);
+                }
+            }
 
             if (autoHarvestWithExtension) {
                 // Let the extension do the actual download work; we just enqueue tweet URLs.
@@ -1586,11 +1698,122 @@
         console.log(`Processed ${rootTweetData.length} root tweet sections with conversation-aware sorting.`);
         generateMarkdown(finalSequence, `${account}_with_replies.md`);
 
+        // Export yt-dlp batch files for voice posts (tweet URL is the best input).
+        // NOTE: A userscript cannot execute yt-dlp locally, so we generate a script you can run in PowerShell.
+        if (exportVoiceYtDlp) {
+            try {
+                exportVoiceYtDlpBatchFiles(scrapedData, account);
+            } catch {
+                // ignore: do not block markdown export
+            }
+        }
+
         // Restore zoom after we're done (especially helpful if you keep browsing after download).
         resetPageZoomTo100();
 
         // Update status after download to show the saved checkpoint.
         setUiStatus(`Downloaded. ${formatStartTweetStatus()}`);
+    }
+
+    function collectUniqueVoiceTweetUrlsFromScrapedData(allTweets) {
+        const out = new Set();
+        for (const t of (allTweets || [])) {
+            if (!t?.id) continue;
+            if (!t.isVoicePost) continue;
+            out.add(normalizeStatusUrl(t.id));
+        }
+        return Array.from(out);
+    }
+
+    function exportVoiceYtDlpBatchFiles(allTweets, accountName) {
+        const urls = collectUniqueVoiceTweetUrlsFromScrapedData(allTweets);
+        if (!urls || urls.length === 0) return;
+
+        const safeAccount = String(accountName || 'account').replace(/[^a-z0-9_-]/gi, '_');
+        const listFilename = `${safeAccount}_voice_tweets.txt`;
+        const ps1Filename = `${safeAccount}_voice_ytdlp.ps1`;
+        const cmdFilename = `${safeAccount}_voice_ytdlp.cmd`;
+
+        const listContent = urls.join('\n') + '\n';
+
+        // PowerShell script: extracts tweet status ID and forces a deterministic m4a filename.
+        // You can tweak $CookiesBrowser to 'chrome', 'edge', etc.
+        const cookiesBrowser = String(ytDlpCookiesBrowser || DEFAULT_YTDLP_COOKIES_BROWSER).trim() || DEFAULT_YTDLP_COOKIES_BROWSER;
+        const ps1 = [
+            '# Generated by Twitter Scraper for /with_replies (Tampermonkey)',
+            '# Purpose: download Voice posts via yt-dlp using the tweet URL (works even when extensions fail).',
+            '',
+            '$ErrorActionPreference = "Stop"',
+            `$CookiesBrowser = "${cookiesBrowser.replace(/"/g, '""')}"`,
+            `$ListPath = Join-Path $PSScriptRoot "${listFilename.replace(/"/g, '""')}"`,
+            '',
+            'if (-not (Test-Path $ListPath)) {',
+            '  throw "Missing URL list: $ListPath"',
+            '}',
+            '',
+            '$urls = Get-Content -LiteralPath $ListPath | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }',
+            'if ($urls.Count -eq 0) {',
+            '  Write-Host "No URLs found in list."',
+            '  exit 0',
+            '}',
+            '',
+            'foreach ($u in $urls) {',
+            '  $m = [regex]::Match($u, "/status/(?<id>\\d+)")',
+            '  if (-not $m.Success) {',
+            '    Write-Warning ("Skipping (no status id): " + $u)',
+            '    continue',
+            '  }',
+            '  $id = $m.Groups["id"].Value',
+            '  $out = ("voice_" + $id + ".%(ext)s")',
+            '  Write-Host ("Downloading voice tweet " + $id + " ...")',
+            '  yt-dlp --cookies-from-browser $CookiesBrowser -x --audio-format m4a --no-overwrites --continue -o $out $u',
+            '}',
+            ''
+        ].join('\r\n');
+
+        // CMD script: simpler, uses yt-dlp templates (may not always match tweet id); PS1 is preferred.
+        const cmd = [
+            '@echo off',
+            'setlocal EnableExtensions EnableDelayedExpansion',
+            'REM Generated by Twitter Scraper for /with_replies (Tampermonkey)',
+            'REM Purpose: download Voice posts via yt-dlp using the tweet URL.',
+            '',
+            `set "COOKIES_BROWSER=${cookiesBrowser.replace(/"/g, '')}"`,
+            `set "LIST=${listFilename}"`,
+            '',
+            'if not exist "%LIST%" (',
+            '  echo Missing URL list: %LIST%',
+            '  exit /b 1',
+            ')',
+            '',
+            'for /f "usebackq delims=" %%U in ("%LIST%") do (',
+            '  set "U=%%U"',
+            '  if not "!U!"=="" (',
+            '    yt-dlp --cookies-from-browser "%COOKIES_BROWSER%" -x --audio-format m4a --no-overwrites --continue -o "voice_%(id)s.%(ext)s" "!U!"',
+            '  )',
+            ')',
+            '',
+            'endlocal',
+            ''
+        ].join('\r\n');
+
+        downloadTextFile(listContent, listFilename);
+        downloadTextFile(ps1, ps1Filename);
+        downloadTextFile(cmd, cmdFilename);
+    }
+
+    function downloadTextFile(content, filename) {
+        // Force UTF-8 (and include BOM) so Windows editors don't mis-detect encoding.
+        const utf8WithBom = "\uFEFF" + String(content ?? '');
+        const blob = new Blob([utf8WithBom], { type: "text/plain;charset=utf-8" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
     }
 
     /**
@@ -1858,6 +2081,15 @@
             }
         }
 
+        // Voice posts: the download is handled via yt-dlp (exported as *_voice_ytdlp.ps1).
+        // We embed a deterministic filename that the PS1 script will produce: voice_<tweetId>.m4a
+        if (tweet.isVoicePost && tweet.id) {
+            const restId = extractRestIdFromStatusUrl(tweet.id);
+            if (restId) {
+                content += `\n${indent}![[voice_${restId}.m4a|aud]]`;
+            }
+        }
+
         return content + "\n";
     }
 
@@ -1895,6 +2127,7 @@
     loadScrollStepSetting();
     loadTranslationSettings();
     loadAutoHarvestWithExtensionSetting();
+    loadVoiceExportSettings();
 
     const uiContainer = document.createElement('div');
     uiContainer.style.cssText = 'position:fixed;top:10px;left:10px;z-index:9999;padding:8px;background:rgba(255, 255, 255, 0.9);border:1px solid #ccc;border-radius:6px;box-shadow:0 2px 5px rgba(0,0,0,0.2);display:flex;flex-direction:column;gap:5px;';
@@ -1939,6 +2172,35 @@
     autoHarvestRow.appendChild(autoHarvestCb);
     autoHarvestRow.appendChild(document.createTextNode('Auto-harvest via MediaHarvest extension'));
     uiContainer.appendChild(autoHarvestRow);
+
+    const exportVoiceRow = document.createElement('label');
+    exportVoiceRow.style.cssText = 'display:flex;align-items:center;gap:6px;font:12px system-ui, -apple-system, Segoe UI, Roboto, Arial;color:#111;user-select:none;';
+    const exportVoiceCb = document.createElement('input');
+    exportVoiceCb.type = 'checkbox';
+    exportVoiceCb.checked = !!exportVoiceYtDlp;
+    exportVoiceCb.onchange = () => {
+        exportVoiceYtDlp = exportVoiceCb.checked;
+        saveVoiceExportSettings();
+    };
+    exportVoiceRow.appendChild(exportVoiceCb);
+    exportVoiceRow.appendChild(document.createTextNode('Export voice yt-dlp batch files'));
+    uiContainer.appendChild(exportVoiceRow);
+
+    const cookiesRow = document.createElement('label');
+    cookiesRow.style.cssText = 'display:flex;align-items:center;gap:6px;font:12px system-ui, -apple-system, Segoe UI, Roboto, Arial;color:#111;user-select:none;';
+    cookiesRow.appendChild(document.createTextNode('yt-dlp cookies browser:'));
+    const cookiesInput = document.createElement('input');
+    cookiesInput.type = 'text';
+    cookiesInput.value = String(ytDlpCookiesBrowser || DEFAULT_YTDLP_COOKIES_BROWSER);
+    cookiesInput.placeholder = 'firefox / chrome / edge ...';
+    cookiesInput.style.cssText = 'width:110px;padding:4px 6px;border:1px solid #cbd5e1;border-radius:4px;font:12px system-ui, -apple-system, Segoe UI, Roboto, Arial;';
+    cookiesInput.onchange = () => {
+        ytDlpCookiesBrowser = String(cookiesInput.value || '').trim() || DEFAULT_YTDLP_COOKIES_BROWSER;
+        cookiesInput.value = ytDlpCookiesBrowser;
+        saveVoiceExportSettings();
+    };
+    cookiesRow.appendChild(cookiesInput);
+    uiContainer.appendChild(cookiesRow);
 
     const translateWaitRow = document.createElement('label');
     translateWaitRow.style.cssText = 'display:flex;align-items:center;gap:6px;font:12px system-ui, -apple-system, Segoe UI, Roboto, Arial;color:#111;user-select:none;';
