@@ -257,7 +257,7 @@
 
     // Page "zoom" (CSS zoom) to load more content per viewport during scraping.
     // Note: JS cannot change the browser's UI zoom level; this applies a CSS zoom to the page instead.
-    const SCRAPE_PAGE_ZOOM_PERCENT = 60;
+    const SCRAPE_PAGE_ZOOM_PERCENT = 70;
     const RESET_PAGE_ZOOM_PERCENT = 100;
     let appliedPageZoomTarget = null; // 'body' | 'root' | null
 
@@ -326,8 +326,137 @@
         startTweetExclusive: 'wxp_tw_scraper_start_tweet_exclusive',
         scrollStepPx: 'wxp_tw_scraper_scroll_step_px',
         waitForImmersiveTranslate: 'wxp_tw_scraper_wait_for_immersive_translate',
-        translationWaitMs: 'wxp_tw_scraper_translation_wait_ms'
+        translationWaitMs: 'wxp_tw_scraper_translation_wait_ms',
+        autoHarvestWithExtension: 'wxp_tw_scraper_auto_harvest_with_extension'
     };
+
+    // Optional: drive the TwitterMediaHarvest extension by auto-clicking its injected button.
+    // This avoids re-implementing downloads in this userscript and lets the extension manage history/filenames.
+    const DEFAULT_AUTO_HARVEST_WITH_EXTENSION = false;
+    let autoHarvestWithExtension = DEFAULT_AUTO_HARVEST_WITH_EXTENSION;
+    const harvestedTweetIdSet = new Set(); // tweet URL (normalized) -> already clicked by this script
+    const harvestQueue = []; // tweet URL (normalized)
+    let harvestPumpInterval = null;
+    let lastHarvestClickMs = 0;
+    const HARVEST_PUMP_MS = 500;
+    const HARVEST_MIN_INTERVAL_MS = 900; // throttle clicks to avoid hammering UI
+
+    function loadAutoHarvestWithExtensionSetting() {
+        try {
+            const raw = localStorage.getItem(STORAGE_KEYS.autoHarvestWithExtension);
+            if (raw == null || raw === '') return;
+            autoHarvestWithExtension = raw === '1' || raw === 'true';
+        } catch {
+            // ignore
+        }
+    }
+
+    function saveAutoHarvestWithExtensionSetting() {
+        try {
+            localStorage.setItem(STORAGE_KEYS.autoHarvestWithExtension, autoHarvestWithExtension ? '1' : '0');
+        } catch {
+            // ignore
+        }
+    }
+
+    function findTweetElByTweetUrl(tweetUrl) {
+        const restId = extractRestIdFromStatusUrl(tweetUrl);
+        if (!restId) return null;
+        const a = document.querySelector(`article[data-testid="tweet"] a[href*="/status/${restId}"]`);
+        return a?.closest?.('article[data-testid="tweet"]') || null;
+    }
+
+    function findHarvesterWrapper(tweetEl) {
+        if (!tweetEl) return null;
+        return tweetEl.querySelector('.harvester[data-testid="harvester-button"]') || null;
+    }
+
+    function findMediaHarvestButton(tweetEl) {
+        if (!tweetEl) return null;
+        // The extension injects:
+        // <div class="harvester ..." data-testid="harvester-button"><div aria-label="Media Harvest" role="button" ...>
+        return (
+            tweetEl.querySelector('[data-testid="harvester-button"] [aria-label="Media Harvest"][role="button"]') ||
+            tweetEl.querySelector('.harvester[data-testid="harvester-button"] [role="button"][aria-label*="Harvest"]') ||
+            tweetEl.querySelector('.harvester[data-testid="harvester-button"] [role="button"]') ||
+            null
+        );
+    }
+
+    function isTweetHarvestedByExtension(tweetEl) {
+        const wrapper = findHarvesterWrapper(tweetEl);
+        return !!wrapper?.classList?.contains('downloaded');
+    }
+
+    function tweetHasHarvestableMedia(tweetEl) {
+        if (!tweetEl) return false;
+        // Heuristic: tweetPhoto contains photos *and* video containers in current X DOM.
+        // Also check for video player markers.
+        return !!tweetEl.querySelector(
+            'img[src*="pbs.twimg.com/media/"], [data-testid="tweetPhoto"], [data-testid="videoPlayer"], [data-testid="videoComponent"], video'
+        );
+    }
+
+    function enqueueHarvestTweet(tweetUrl) {
+        if (!tweetUrl) return;
+        if (harvestedTweetIdSet.has(tweetUrl)) return;
+        if (harvestQueue.includes(tweetUrl)) return;
+        harvestQueue.push(tweetUrl);
+    }
+
+    function startHarvestPump() {
+        if (harvestPumpInterval) return;
+        harvestPumpInterval = setInterval(processHarvestQueue, HARVEST_PUMP_MS);
+    }
+
+    function stopHarvestPump() {
+        if (!harvestPumpInterval) return;
+        try { clearInterval(harvestPumpInterval); } catch { /* ignore */ }
+        harvestPumpInterval = null;
+    }
+
+    function processHarvestQueue() {
+        if (!autoHarvestWithExtension) return;
+        if (harvestQueue.length === 0) return;
+        const now = Date.now();
+        if (now - lastHarvestClickMs < HARVEST_MIN_INTERVAL_MS) return;
+
+        const tweetUrl = harvestQueue.shift();
+        if (!tweetUrl || harvestedTweetIdSet.has(tweetUrl)) return;
+
+        const tweetEl = findTweetElByTweetUrl(tweetUrl);
+        if (!tweetEl) {
+            harvestQueue.push(tweetUrl);
+            return;
+        }
+
+        // If the extension already recorded it, don't click.
+        if (isTweetHarvestedByExtension(tweetEl)) {
+            harvestedTweetIdSet.add(tweetUrl);
+            return;
+        }
+
+        // Only click when the tweet actually has media.
+        if (!tweetHasHarvestableMedia(tweetEl)) {
+            harvestedTweetIdSet.add(tweetUrl);
+            return;
+        }
+
+        const btn = findMediaHarvestButton(tweetEl);
+        if (!btn) {
+            // Extension button not present yet; re-queue and try later
+            harvestQueue.push(tweetUrl);
+            return;
+        }
+
+        try {
+            btn.click();
+            harvestedTweetIdSet.add(tweetUrl);
+            lastHarvestClickMs = now;
+        } catch {
+            harvestQueue.push(tweetUrl);
+        }
+    }
 
     function clampNumber(n, min, max) {
         const x = Number(n);
@@ -1347,6 +1476,12 @@
                 replies: [] // For compatibility; will be rebuilt during processing
             };
 
+            if (autoHarvestWithExtension) {
+                // Let the extension do the actual download work; we just enqueue tweet URLs.
+                enqueueHarvestTweet(tweetId);
+                startHarvestPump();
+            }
+
             scrapedData.push(tweetData);
             scrapedIdSet.add(tweetId);
         });
@@ -1759,6 +1894,7 @@
     loadStartTweetCheckpoint();
     loadScrollStepSetting();
     loadTranslationSettings();
+    loadAutoHarvestWithExtensionSetting();
 
     const uiContainer = document.createElement('div');
     uiContainer.style.cssText = 'position:fixed;top:10px;left:10px;z-index:9999;padding:8px;background:rgba(255, 255, 255, 0.9);border:1px solid #ccc;border-radius:6px;box-shadow:0 2px 5px rgba(0,0,0,0.2);display:flex;flex-direction:column;gap:5px;';
@@ -1788,6 +1924,21 @@
     autoDlRow.appendChild(autoDlCb);
     autoDlRow.appendChild(document.createTextNode('Auto-download on auto-stop'));
     uiContainer.appendChild(autoDlRow);
+
+    const autoHarvestRow = document.createElement('label');
+    autoHarvestRow.style.cssText = 'display:flex;align-items:center;gap:6px;font:12px system-ui, -apple-system, Segoe UI, Roboto, Arial;color:#111;user-select:none;';
+    const autoHarvestCb = document.createElement('input');
+    autoHarvestCb.type = 'checkbox';
+    autoHarvestCb.checked = !!autoHarvestWithExtension;
+    autoHarvestCb.onchange = () => {
+        autoHarvestWithExtension = autoHarvestCb.checked;
+        saveAutoHarvestWithExtensionSetting();
+        if (autoHarvestWithExtension) startHarvestPump();
+        else stopHarvestPump();
+    };
+    autoHarvestRow.appendChild(autoHarvestCb);
+    autoHarvestRow.appendChild(document.createTextNode('Auto-harvest via MediaHarvest extension'));
+    uiContainer.appendChild(autoHarvestRow);
 
     const translateWaitRow = document.createElement('label');
     translateWaitRow.style.cssText = 'display:flex;align-items:center;gap:6px;font:12px system-ui, -apple-system, Segoe UI, Roboto, Arial;color:#111;user-select:none;';
