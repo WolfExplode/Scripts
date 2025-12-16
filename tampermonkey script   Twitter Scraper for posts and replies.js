@@ -14,11 +14,44 @@
     'use strict';
 
     let scrapedData = [];
+    let scrapedIdSet = new Set();
     let scrollInterval;
     const account = window.location.pathname.split('/')[1];
     const profileHandle = `@${account}`;
 
     let emojiMapCache = null;
+
+    // Scroll step (constant; avoids zoom-dependent viewport math)
+    const DEFAULT_SCROLL_STEP_PX = 2000;
+    const MIN_SCROLL_STEP_PX = 200;
+    const MAX_SCROLL_STEP_PX = 6000;
+    let scrollStepPx = DEFAULT_SCROLL_STEP_PX;
+
+    // Page "zoom" (CSS zoom) to load more content per viewport during scraping.
+    // Note: JS cannot change the browser's UI zoom level; this applies a CSS zoom to the page instead.
+    const SCRAPE_PAGE_ZOOM_PERCENT = 50;
+    const RESET_PAGE_ZOOM_PERCENT = 100;
+    let appliedPageZoomTarget = null; // 'body' | 'root' | null
+
+    // Smoother scrolling: tick more often, but scroll less per tick (preserve px/sec feel).
+    // These are intentionally separate so UI "Scroll step" can remain a simple single value.
+    const SCRAPE_TICK_MS = 750; // was 1500
+    const SCRAPE_SCROLL_BASE_TICK_MS = 1500;
+    const AUTO_SCROLL_TICK_MS = 200; // was 850
+    const AUTO_SCROLL_BASE_TICK_MS = 850;
+    const MIN_EFFECTIVE_SCROLL_STEP_PX = 80; // allows smaller increments even if UI min is higher
+
+    // Optional: wait for translation plugins (e.g. Immersive Translate) to inject translated DOM.
+    const DEFAULT_WAIT_FOR_IMMERSIVE_TRANSLATE = false;
+    const DEFAULT_TRANSLATION_WAIT_MS = 6000;
+    const MIN_TRANSLATION_WAIT_MS = 0;
+    const MAX_TRANSLATION_WAIT_MS = 15000;
+    const TRANSLATION_POLL_MS = 100;
+    let waitForImmersiveTranslate = DEFAULT_WAIT_FOR_IMMERSIVE_TRANSLATE;
+    let translationWaitMs = DEFAULT_TRANSLATION_WAIT_MS;
+    // Per-tweet deferral tracking so we don't permanently capture the original before translation arrives.
+    // tweetId -> { firstSeenMs: number, defers: number }
+    let translationDeferById = new Map();
 
     // Optional "start from this tweet" gating
     let startFromTweetId = null; // full status URL (as used by tweet.id)
@@ -31,7 +64,7 @@
     let consecutiveNoNewTicks = 0;
     let lastScrollY = 0;
     let lastScrollHeight = 0;
-    const MAX_NO_NEW_TICKS = 8; // ~12s with 1500ms interval
+    const MAX_NO_NEW_TICKS = 16; // ~12s with 750ms interval
 
     // Picker-mode state
     let isPickingStartTweet = false;
@@ -52,13 +85,142 @@
     let autoScrollPriorOutline = '';
     let autoScrollPriorOutlineOffset = '';
     const AUTO_SCROLL_HIGHLIGHT_STYLE = '3px solid #f59e0b';
-    const AUTO_SCROLL_TICK_MS = 850;
-    const AUTO_SCROLL_MAX_TICKS = 6000; // safety limit (~85 minutes)
+    const AUTO_SCROLL_MAX_TICKS = 12000; // safety limit (~85 minutes at 425ms)
 
     const STORAGE_KEYS = {
         startTweetId: 'wxp_tw_scraper_start_tweet_id',
-        startTweetExclusive: 'wxp_tw_scraper_start_tweet_exclusive'
+        startTweetExclusive: 'wxp_tw_scraper_start_tweet_exclusive',
+        scrollStepPx: 'wxp_tw_scraper_scroll_step_px',
+        waitForImmersiveTranslate: 'wxp_tw_scraper_wait_for_immersive_translate',
+        translationWaitMs: 'wxp_tw_scraper_translation_wait_ms'
     };
+
+    function clampNumber(n, min, max) {
+        const x = Number(n);
+        if (!Number.isFinite(x)) return min;
+        return Math.min(max, Math.max(min, x));
+    }
+
+    function sleep(ms) {
+        return new Promise(resolve => setTimeout(resolve, Math.max(0, ms | 0)));
+    }
+
+    function loadScrollStepSetting() {
+        try {
+            const raw = localStorage.getItem(STORAGE_KEYS.scrollStepPx);
+            if (raw == null || raw === '') return;
+            scrollStepPx = clampNumber(parseInt(raw, 10), MIN_SCROLL_STEP_PX, MAX_SCROLL_STEP_PX);
+        } catch {
+            // ignore
+        }
+    }
+
+    function saveScrollStepSetting() {
+        try {
+            localStorage.setItem(STORAGE_KEYS.scrollStepPx, String(scrollStepPx));
+        } catch {
+            // ignore
+        }
+    }
+
+    function getScrollStepPx() {
+        return clampNumber(scrollStepPx, MIN_SCROLL_STEP_PX, MAX_SCROLL_STEP_PX);
+    }
+
+    function setPageZoomPercent(percent) {
+        const pct = clampNumber(percent, 10, 300);
+        const body = document.body;
+        const root = document.documentElement;
+        if (body) {
+            body.style.zoom = `${pct}%`;
+            appliedPageZoomTarget = 'body';
+        } else if (root) {
+            root.style.zoom = `${pct}%`;
+            appliedPageZoomTarget = 'root';
+        }
+    }
+
+    function applyScrapePageZoom() {
+        setPageZoomPercent(SCRAPE_PAGE_ZOOM_PERCENT);
+    }
+
+    function resetPageZoomTo100() {
+        const body = document.body;
+        const root = document.documentElement;
+        if (appliedPageZoomTarget === 'body' && body) {
+            body.style.zoom = `${RESET_PAGE_ZOOM_PERCENT}%`;
+        } else if (appliedPageZoomTarget === 'root' && root) {
+            root.style.zoom = `${RESET_PAGE_ZOOM_PERCENT}%`;
+        } else {
+            // Best-effort: reset both if we don't know which one was used.
+            if (body) body.style.zoom = `${RESET_PAGE_ZOOM_PERCENT}%`;
+            if (root) root.style.zoom = `${RESET_PAGE_ZOOM_PERCENT}%`;
+        }
+        appliedPageZoomTarget = null;
+    }
+
+    function getEffectiveScrollStepPxForTick(tickMs, baseTickMs) {
+        const base = getScrollStepPx();
+        const scaled = Math.round(base * (tickMs / baseTickMs));
+        return clampNumber(scaled, MIN_EFFECTIVE_SCROLL_STEP_PX, MAX_SCROLL_STEP_PX);
+    }
+
+    function getScrapeScrollStepPx() {
+        return getEffectiveScrollStepPxForTick(SCRAPE_TICK_MS, SCRAPE_SCROLL_BASE_TICK_MS);
+    }
+
+    function getAutoScrollStepPx() {
+        return getEffectiveScrollStepPxForTick(AUTO_SCROLL_TICK_MS, AUTO_SCROLL_BASE_TICK_MS);
+    }
+
+    function loadTranslationSettings() {
+        try {
+            const rawEnabled = localStorage.getItem(STORAGE_KEYS.waitForImmersiveTranslate);
+            if (rawEnabled != null) waitForImmersiveTranslate = rawEnabled === 'true';
+
+            const rawWait = localStorage.getItem(STORAGE_KEYS.translationWaitMs);
+            if (rawWait != null && rawWait !== '') {
+                translationWaitMs = clampNumber(parseInt(rawWait, 10), MIN_TRANSLATION_WAIT_MS, MAX_TRANSLATION_WAIT_MS);
+            }
+        } catch {
+            // ignore
+        }
+    }
+
+    function saveTranslationSettings() {
+        try {
+            localStorage.setItem(STORAGE_KEYS.waitForImmersiveTranslate, String(!!waitForImmersiveTranslate));
+            localStorage.setItem(STORAGE_KEYS.translationWaitMs, String(translationWaitMs | 0));
+        } catch {
+            // ignore
+        }
+    }
+
+    function getTranslationWaitMs() {
+        return clampNumber(translationWaitMs, MIN_TRANSLATION_WAIT_MS, MAX_TRANSLATION_WAIT_MS) | 0;
+    }
+
+    function shouldDeferTweetUntilTranslated(tweetId, tweetTextElement) {
+        if (!waitForImmersiveTranslate) return false;
+        if (!tweetId || !tweetTextElement) return false;
+        if (!isImmersiveTranslateActiveOnPage()) return false;
+
+        // If translated content exists, do not defer.
+        if (getImmersiveTranslateContentNode(tweetTextElement)) return false;
+
+        const now = Date.now();
+        const entry = translationDeferById.get(tweetId) || { firstSeenMs: now, defers: 0 };
+        entry.defers++;
+        translationDeferById.set(tweetId, entry);
+
+        // Wait up to ~translationWaitMs per tweet (minimum floor so fast settings still work).
+        const maxPerTweetWait = Math.max(1200, getTranslationWaitMs());
+
+        // Defer while within the per-tweet window and for a limited number of attempts.
+        // After that, fall back to scraping the original so we don't stall forever.
+        if ((now - entry.firstSeenMs) <= maxPerTweetWait && entry.defers <= 25) return true;
+        return false;
+    }
 
     function setUiStatus(text) {
         const el = document.getElementById('wxp-scraper-status');
@@ -78,7 +240,7 @@
         for (let i = 0; i < tweetEls.length; i++) {
             const tweet = tweetEls[i];
             const tweetTextEl = tweet.querySelector?.('[data-testid="tweetText"]');
-            const hay = (tweetTextEl?.innerText || tweet?.innerText || '').trim();
+            const hay = (extractTweetTextWithEmojis(tweetTextEl) || tweetTextEl?.innerText || tweet?.innerText || '').trim();
             if (hay && hay.includes(n)) return tweet;
         }
         return null;
@@ -170,7 +332,7 @@
             // Scroll down to load more
             const beforeY = window.scrollY;
             const beforeH = document.documentElement.scrollHeight;
-            window.scrollBy(0, Math.max(400, Math.floor(window.innerHeight * 0.85)));
+            window.scrollBy(0, getAutoScrollStepPx());
             const afterY = window.scrollY;
             const afterH = document.documentElement.scrollHeight;
 
@@ -184,17 +346,17 @@
             autoScrollLastScrollY = afterY;
             autoScrollLastScrollH = afterH;
 
-            if (autoScrollTicks % 10 === 0) {
+            if (autoScrollTicks % 20 === 0) {
                 const secs = Math.max(0, Math.round((Date.now() - autoScrollStartMs) / 1000));
                 setAutoScrollStatus(`Auto-scroll: searching (${secs}s) …`);
             }
 
-            if (isEndOfTimelineVisible() && autoScrollStalledTicks >= 3) {
+            if (isEndOfTimelineVisible() && autoScrollStalledTicks >= 6) {
                 stopAutoScrollToText('Auto-scroll: reached end of timeline (no match found).');
                 return;
             }
 
-            if (autoScrollStalledTicks >= 12) {
+            if (autoScrollStalledTicks >= 24) {
                 stopAutoScrollToText('Auto-scroll: stalled (no new content). Try again or scroll manually a bit.');
                 return;
             }
@@ -544,8 +706,122 @@
         return out.join('');
     }
 
+    function getImmersiveTranslateContentNode(rootEl) {
+        if (!rootEl) return null;
+        return (
+            rootEl.querySelector?.('.immersive-translate-target-inner') ||
+            rootEl.querySelector?.('.immersive-translate-target-translation-block-wrapper') ||
+            rootEl.querySelector?.('[data-immersive-translate-translation-element-mark]') ||
+            null
+        );
+    }
+
+    function isImmersiveTranslateActiveOnPage() {
+        // Best-effort: if the extension isn't installed/active, don't add unnecessary waits.
+        return !!document.querySelector(
+            '.immersive-translate-target-wrapper, .immersive-translate-target-inner, [data-immersive-translate-translation-element-mark]'
+        );
+    }
+
+    function getUnscrapedTweetTextElements(limit = 12) {
+        const out = [];
+        const tweetEls = document.querySelectorAll('article[data-testid="tweet"]');
+        for (let i = 0; i < tweetEls.length && out.length < limit; i++) {
+            const tweet = tweetEls[i];
+            const tweetLinkElement = tweet.querySelector('a[href*="/status/"]');
+            const tweetId = normalizeStatusUrl(tweetLinkElement?.href);
+            if (!tweetId || scrapedIdSet.has(tweetId)) continue;
+            const tweetTextElement = tweet.querySelector('[data-testid="tweetText"]');
+            if (!tweetTextElement) continue;
+            out.push(tweetTextElement);
+        }
+        return out;
+    }
+
+    async function waitForImmersiveTranslateAfterScroll() {
+        if (!waitForImmersiveTranslate) return;
+        const waitMs = getTranslationWaitMs();
+        if (waitMs <= 0) return;
+
+        const start = Date.now();
+        while (Date.now() - start < waitMs) {
+            const sample = getUnscrapedTweetTextElements(10);
+            if (sample.length === 0) return;
+
+            // If any unsaved tweet already has translated content injected, we're good to extract.
+            let anyTranslated = false;
+            let anyWrapperPresent = false;
+            let anyWrapperMissingContent = false;
+
+            for (const el of sample) {
+                if (getImmersiveTranslateContentNode(el)) {
+                    anyTranslated = true;
+                    break;
+                }
+                if (el.querySelector?.('.immersive-translate-target-wrapper')) {
+                    anyWrapperPresent = true;
+                    // wrapper exists but content node isn't found yet => likely mid-translation
+                    anyWrapperMissingContent = true;
+                }
+            }
+
+            // If the plugin isn't active at all, don't busy-wait.
+            if (!isImmersiveTranslateActiveOnPage() && !anyWrapperPresent) return;
+
+            if (anyTranslated) return;
+
+            // If we see wrappers but not the translated content yet, keep polling a bit.
+            if (!anyWrapperMissingContent) {
+                // No signals yet; just wait out the remaining time with polling.
+            }
+
+            await sleep(TRANSLATION_POLL_MS);
+        }
+    }
+
+    function getDeferredUnscrapedTweetTextElements(limit = 12) {
+        // Tweets we *already* deferred (translationDeferById has entry), still unscraped, and still missing translated content.
+        // We use this to decide whether to pause scrolling until the translation extension finishes injecting DOM.
+        if (!waitForImmersiveTranslate) return [];
+        if (!isImmersiveTranslateActiveOnPage()) return [];
+
+        const out = [];
+        const tweetEls = document.querySelectorAll('article[data-testid="tweet"]');
+        for (let i = 0; i < tweetEls.length && out.length < limit; i++) {
+            const tweet = tweetEls[i];
+            const tweetLinkElement = tweet.querySelector('a[href*="/status/"]');
+            const tweetId = normalizeStatusUrl(tweetLinkElement?.href);
+            if (!tweetId || scrapedIdSet.has(tweetId)) continue;
+            if (!translationDeferById.has(tweetId)) continue;
+            const tweetTextElement = tweet.querySelector('[data-testid="tweetText"]');
+            if (!tweetTextElement) continue;
+            if (getImmersiveTranslateContentNode(tweetTextElement)) continue;
+            out.push(tweetTextElement);
+        }
+        return out;
+    }
+
+    async function waitForDeferredTranslationsToSettle() {
+        // If we deferred any tweets in extractTweets(), pause scrolling and poll until those tweets
+        // either have translated DOM injected or have aged out of the per-tweet defer window.
+        if (!waitForImmersiveTranslate) return;
+        const waitMs = getTranslationWaitMs();
+        if (waitMs <= 0) return;
+
+        const maxWait = Math.max(1200, waitMs);
+        const start = Date.now();
+        while (Date.now() - start < maxWait) {
+            const pending = getDeferredUnscrapedTweetTextElements(12);
+            if (pending.length === 0) return;
+            await sleep(TRANSLATION_POLL_MS);
+        }
+    }
+
     function startScraping() {
+        applyScrapePageZoom();
         scrapedData = [];
+        scrapedIdSet = new Set();
+        translationDeferById = new Map();
         console.log(`Scraping started for ${profileHandle}'s replies page...`);
         // Gate extraction until we hit the selected start tweet, if any.
         hasReachedStartTweet = !startFromTweetId;
@@ -555,62 +831,80 @@
         lastScrollY = window.scrollY;
         lastScrollHeight = document.documentElement.scrollHeight;
 
+        let tickInProgress = false;
         scrollInterval = setInterval(() => {
-            const beforeCount = scrapedData.length;
-            const beforeY = window.scrollY;
-            const beforeH = document.documentElement.scrollHeight;
+            if (tickInProgress) return;
+            tickInProgress = true;
 
-            window.scrollBy(0, window.innerHeight * 0.8);
-            extractTweets();
+            (async () => {
+                const beforeCount = scrapedData.length;
+                const beforeY = window.scrollY;
+                const beforeH = document.documentElement.scrollHeight;
 
-            const afterCount = scrapedData.length;
-            const afterY = window.scrollY;
-            const afterH = document.documentElement.scrollHeight;
+                window.scrollBy(0, getScrapeScrollStepPx());
 
-            const didAddAny = afterCount > beforeCount;
-            const didScroll = afterY !== beforeY;
-            const didGrow = afterH !== beforeH;
+                // Give translation extensions a chance to inject translated DOM before scraping.
+                await waitForImmersiveTranslateAfterScroll();
 
-            if (didAddAny) {
-                consecutiveNoNewTicks = 0;
-            } else {
-                consecutiveNoNewTicks++;
-            }
+                const firstPass = extractTweets();
+                if (firstPass.deferredCount > 0) {
+                    setUiStatus(`Waiting for translation… (pending: ${firstPass.deferredCount})`);
+                    await waitForDeferredTranslationsToSettle();
+                    extractTweets(); // re-attempt after translations settle / time out
+                }
 
-            // If we can no longer scroll AND no new tweets are being found, we are likely at the end.
-            if (autoStopEnabled) {
-                // If we're still waiting to reach the start tweet checkpoint, do NOT auto-stop.
-                if (!hasReachedStartTweet && startFromTweetId) {
+                const afterCount = scrapedData.length;
+                const afterY = window.scrollY;
+                const afterH = document.documentElement.scrollHeight;
+
+                const didAddAny = afterCount > beforeCount;
+                const didScroll = afterY !== beforeY;
+                const didGrow = afterH !== beforeH;
+
+                if (didAddAny) {
                     consecutiveNoNewTicks = 0;
-                    lastScrollY = afterY;
-                    lastScrollHeight = afterH;
-                    setUiStatus(`Waiting for start tweet… ${formatStartTweetStatus()}`);
-                    return;
+                } else {
+                    consecutiveNoNewTicks++;
                 }
 
-                const endVisible = isEndOfTimelineVisible();
-                const stalledScroll = !didScroll && !didGrow && afterY === lastScrollY && afterH === lastScrollHeight;
+                // If we can no longer scroll AND no new tweets are being found, we are likely at the end.
+                if (autoStopEnabled) {
+                    // If we're still waiting to reach the start tweet checkpoint, do NOT auto-stop.
+                    if (!hasReachedStartTweet && startFromTweetId) {
+                        consecutiveNoNewTicks = 0;
+                        lastScrollY = afterY;
+                        lastScrollHeight = afterH;
+                        setUiStatus(`Waiting for start tweet… ${formatStartTweetStatus()}`);
+                        return;
+                    }
 
-                if (endVisible && consecutiveNoNewTicks >= 2) {
-                    stopScrapingInterval(`Auto-stopped: end of timeline detected (tweets: ${afterCount}).`);
-                    if (autoDownloadOnAutoStop) stopAndDownload();
-                    return;
+                    const endVisible = isEndOfTimelineVisible();
+                    const stalledScroll = !didScroll && !didGrow && afterY === lastScrollY && afterH === lastScrollHeight;
+
+                    if (endVisible && consecutiveNoNewTicks >= 4) {
+                        stopScrapingInterval(`Auto-stopped: end of timeline detected (tweets: ${afterCount}).`);
+                        if (autoDownloadOnAutoStop) stopAndDownload();
+                        return;
+                    }
+
+                    if (consecutiveNoNewTicks >= MAX_NO_NEW_TICKS && stalledScroll) {
+                        stopScrapingInterval(`Auto-stopped: no new tweets detected (ticks: ${consecutiveNoNewTicks}, tweets: ${afterCount}).`);
+                        if (autoDownloadOnAutoStop) stopAndDownload();
+                        return;
+                    }
                 }
 
-                if (consecutiveNoNewTicks >= MAX_NO_NEW_TICKS && stalledScroll) {
-                    stopScrapingInterval(`Auto-stopped: no new tweets detected (ticks: ${consecutiveNoNewTicks}, tweets: ${afterCount}).`);
-                    if (autoDownloadOnAutoStop) stopAndDownload();
-                    return;
-                }
-            }
-
-            lastScrollY = afterY;
-            lastScrollHeight = afterH;
-        }, 1500);
+                lastScrollY = afterY;
+                lastScrollHeight = afterH;
+            })().finally(() => {
+                tickInProgress = false;
+            });
+        }, SCRAPE_TICK_MS);
     }
 
     function extractTweets() {
         const tweetElements = document.querySelectorAll('article[data-testid="tweet"]');
+        let deferredCount = 0;
 
         tweetElements.forEach(tweet => {
             const socialContext = tweet.querySelector('[data-testid="socialContext"]');
@@ -621,7 +915,7 @@
             const tweetLinkElement = tweet.querySelector('a[href*="/status/"]');
             const tweetId = normalizeStatusUrl(tweetLinkElement?.href);
 
-            if (!tweetId || scrapedData.some(t => t.id === tweetId)) return;
+            if (!tweetId || scrapedIdSet.has(tweetId)) return;
 
             // If a start tweet was selected, skip everything until we reach it.
             if (!hasReachedStartTweet && startFromTweetId) {
@@ -632,6 +926,13 @@
 
             const tweetTextElement = tweet.querySelector('[data-testid="tweetText"]');
             const timeElement = tweet.querySelector('time');
+
+            // If we're trying to capture Immersive Translate output, avoid "locking in" the original text
+            // before the extension injects its translated subtree.
+            if (shouldDeferTweetUntilTranslated(tweetId, tweetTextElement)) {
+                deferredCount++;
+                return;
+            }
 
             // Check for reply indicator (vertical line on left side)
             const isReply = !!tweet.querySelector(
@@ -661,9 +962,11 @@
             };
 
             scrapedData.push(tweetData);
+            scrapedIdSet.add(tweetId);
         });
 
         console.log(`Extracted ${scrapedData.length} tweets so far...`);
+        return { deferredCount };
     }
 
     function stopAndDownload() {
@@ -761,6 +1064,9 @@
         
         console.log(`Processed ${rootTweetData.length} root tweet sections with conversation-aware sorting.`);
         generateMarkdown(finalSequence, `${account}_with_replies.md`);
+
+        // Restore zoom after we're done (especially helpful if you keep browsing after download).
+        resetPageZoomTo100();
 
         // Update status after download to show the saved checkpoint.
         setUiStatus(`Downloaded. ${formatStartTweetStatus()}`);
@@ -1026,7 +1332,9 @@
     }
 
     function downloadMarkdown(content, filename) {
-        const blob = new Blob([content], { type: "text/markdown" });
+        // Force UTF-8 (and include BOM) so Windows editors don't mis-detect encoding and mangle CJK text.
+        const utf8WithBom = "\uFEFF" + String(content ?? '');
+        const blob = new Blob([utf8WithBom], { type: "text/markdown;charset=utf-8" });
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
         a.href = url;
@@ -1040,6 +1348,8 @@
     // --- UI Setup ---
     // Load any saved checkpoint before building UI (so the status line reflects it).
     loadStartTweetCheckpoint();
+    loadScrollStepSetting();
+    loadTranslationSettings();
 
     const uiContainer = document.createElement('div');
     uiContainer.style.cssText = 'position:fixed;top:10px;left:10px;z-index:9999;padding:8px;background:rgba(255, 255, 255, 0.9);border:1px solid #ccc;border-radius:6px;box-shadow:0 2px 5px rgba(0,0,0,0.2);display:flex;flex-direction:column;gap:5px;';
@@ -1069,6 +1379,55 @@
     autoDlRow.appendChild(autoDlCb);
     autoDlRow.appendChild(document.createTextNode('Auto-download on auto-stop'));
     uiContainer.appendChild(autoDlRow);
+
+    const translateWaitRow = document.createElement('label');
+    translateWaitRow.style.cssText = 'display:flex;align-items:center;gap:6px;font:12px system-ui, -apple-system, Segoe UI, Roboto, Arial;color:#111;user-select:none;';
+    const translateWaitCb = document.createElement('input');
+    translateWaitCb.type = 'checkbox';
+    translateWaitCb.checked = !!waitForImmersiveTranslate;
+    translateWaitCb.onchange = () => {
+        waitForImmersiveTranslate = translateWaitCb.checked;
+        saveTranslationSettings();
+    };
+    translateWaitRow.appendChild(translateWaitCb);
+    translateWaitRow.appendChild(document.createTextNode('Wait for Immersive Translate'));
+    uiContainer.appendChild(translateWaitRow);
+
+    const translateWaitMsRow = document.createElement('label');
+    translateWaitMsRow.style.cssText = 'display:flex;align-items:center;gap:6px;font:12px system-ui, -apple-system, Segoe UI, Roboto, Arial;color:#111;user-select:none;';
+    translateWaitMsRow.appendChild(document.createTextNode('Translation wait (ms):'));
+    const translateWaitMsInput = document.createElement('input');
+    translateWaitMsInput.type = 'number';
+    translateWaitMsInput.min = String(MIN_TRANSLATION_WAIT_MS);
+    translateWaitMsInput.max = String(MAX_TRANSLATION_WAIT_MS);
+    translateWaitMsInput.step = '100';
+    translateWaitMsInput.value = String(getTranslationWaitMs());
+    translateWaitMsInput.style.cssText = 'width:86px;padding:4px 6px;border:1px solid #cbd5e1;border-radius:4px;font:12px system-ui, -apple-system, Segoe UI, Roboto, Arial;';
+    translateWaitMsInput.onchange = () => {
+        translationWaitMs = clampNumber(parseInt(translateWaitMsInput.value, 10), MIN_TRANSLATION_WAIT_MS, MAX_TRANSLATION_WAIT_MS);
+        translateWaitMsInput.value = String(getTranslationWaitMs());
+        saveTranslationSettings();
+    };
+    translateWaitMsRow.appendChild(translateWaitMsInput);
+    uiContainer.appendChild(translateWaitMsRow);
+
+    const scrollStepRow = document.createElement('label');
+    scrollStepRow.style.cssText = 'display:flex;align-items:center;gap:6px;font:12px system-ui, -apple-system, Segoe UI, Roboto, Arial;color:#111;user-select:none;';
+    scrollStepRow.appendChild(document.createTextNode('Scroll step (px):'));
+    const scrollStepInput = document.createElement('input');
+    scrollStepInput.type = 'number';
+    scrollStepInput.min = String(MIN_SCROLL_STEP_PX);
+    scrollStepInput.max = String(MAX_SCROLL_STEP_PX);
+    scrollStepInput.step = '50';
+    scrollStepInput.value = String(getScrollStepPx());
+    scrollStepInput.style.cssText = 'width:86px;padding:4px 6px;border:1px solid #cbd5e1;border-radius:4px;font:12px system-ui, -apple-system, Segoe UI, Roboto, Arial;';
+    scrollStepInput.onchange = () => {
+        scrollStepPx = clampNumber(parseInt(scrollStepInput.value, 10), MIN_SCROLL_STEP_PX, MAX_SCROLL_STEP_PX);
+        scrollStepInput.value = String(getScrollStepPx());
+        saveScrollStepSetting();
+    };
+    scrollStepRow.appendChild(scrollStepInput);
+    uiContainer.appendChild(scrollStepRow);
 
     const pickStartButton = document.createElement('button');
     pickStartButton.textContent = 'Pick start tweet';
