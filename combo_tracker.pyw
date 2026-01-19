@@ -8,6 +8,8 @@ import os
 import sys
 from pathlib import Path
 
+# no need for backwards compatibility with previous versions of the code. we are still in development phase
+
 class ComboTrackerApp:
     def __init__(self, root):
         self.root = root
@@ -28,9 +30,15 @@ class ComboTrackerApp:
         self.hold_started_at = 0.0
         self.hold_row_id = None
         self.hold_required_ms = None
+        self.wait_in_progress = False
+        self.wait_started_at = 0.0
+        self.wait_until = 0.0
+        self.wait_row_id = None
+        self.wait_required_ms = None
         self.currently_pressed = set()
         self.attempt_counter = 0
-        self.combo_enders = set()  # if empty => legacy behavior (any wrong input drops)
+        # Combo enders: key -> grace_ms (0 means no grace; wrong press drops immediately)
+        self.combo_enders = {}
 
         # --- Persistence ---
         self.data_dir = self._get_data_dir()
@@ -55,14 +63,15 @@ class ComboTrackerApp:
             frame_add,
             text="Use: LMB, RMB, MMB for mouse clicks.\n"
                  "Hold syntax: hold(space,0.2) or space{0.2}\n"
+                 "Wait syntax: wait:0.5\n"
                  "Decimals are seconds; append 'ms' for milliseconds.\n"
-                 "Ex: a, w, LMB, hold(space,0.3), d, RMB",
+                 "Ex: a, w, wait:0.2, LMB, hold(space,0.3), d, RMB",
             fg="gray",
             font=("Arial", 8),
         )
         lbl_help.grid(row=1, column=3, sticky="w", padx=5)
 
-        tk.Label(frame_add, text="Combo enders (comma sep):").grid(row=2, column=2, sticky="w")
+        tk.Label(frame_add, text="Combo enders (key:seconds):").grid(row=2, column=2, sticky="w")
         self.entry_enders = tk.Entry(frame_add, width=25)
         self.entry_enders.grid(row=2, column=3, padx=5, sticky="w")
         btn_apply_enders = tk.Button(frame_add, text="Apply", command=self.apply_enders)
@@ -175,24 +184,36 @@ class ComboTrackerApp:
         """
         Parse one combo token into a step.
 
-        Supported formats (case-insensitive for 'hold'):
+        Supported formats (case-insensitive for 'hold'/'wait'):
         - Normal press/click: "a", "space", "lmb"
         - Hold: "hold(space,500)" or "space{500}" or "space{500ms}"
+        - Wait: "wait:0.5" (minimum delay before next input)
 
-        Returns a dict: {"input": "space", "hold_ms": 500} or {"input": "a", "hold_ms": None}
+        Returns a dict:
+          - press: {"input": "a", "hold_ms": None, "wait_ms": None}
+          - hold:  {"input": "space", "hold_ms": 500, "wait_ms": None}
+          - wait:  {"input": None, "hold_ms": None, "wait_ms": 500}
         """
         t = (token or "").strip()
         if not t:
             return None
 
         tl = t.lower()
+
+        # wait:<duration>
+        if tl.startswith("wait:"):
+            dur = tl[len("wait:"):].strip()
+            wait_ms = self._parse_duration(dur)
+            if wait_ms is not None:
+                return {"input": None, "hold_ms": None, "wait_ms": wait_ms}
+
         if tl.startswith("hold(") and tl.endswith(")"):
             inner = tl[len("hold("):-1]
             parts = [p.strip() for p in inner.split(",", 1)]
             if len(parts) == 2 and parts[0] and parts[1]:
                 hold_ms = self._parse_duration(parts[1])
                 if hold_ms is not None:
-                    return {"input": parts[0], "hold_ms": hold_ms}
+                    return {"input": parts[0], "hold_ms": hold_ms, "wait_ms": None}
 
         if "{" in tl and tl.endswith("}"):
             base, rest = tl.split("{", 1)
@@ -201,9 +222,9 @@ class ComboTrackerApp:
             if base:
                 hold_ms = self._parse_duration(ms_str)
                 if hold_ms is not None:
-                    return {"input": base, "hold_ms": hold_ms}
+                    return {"input": base, "hold_ms": hold_ms, "wait_ms": None}
 
-        return {"input": tl, "hold_ms": None}
+        return {"input": tl, "hold_ms": None, "wait_ms": None}
 
     def _parse_duration(self, raw: str):
         token = raw.lower().strip()
@@ -242,6 +263,9 @@ class ComboTrackerApp:
             return f"{hold_ms // 1000:d}s"
         return f"{hold_ms / 1000.0:.3g}s"
 
+    def _format_wait_requirement(self, wait_ms: int):
+        return self._format_hold_requirement(wait_ms)
+
     def _insert_attempt_separator(self):
         self.attempt_counter += 1
         name = self.active_combo_name or "Combo"
@@ -250,9 +274,23 @@ class ComboTrackerApp:
         self.tree.yview_moveto(1)
 
     def _is_combo_ender(self, input_name: str) -> bool:
-        # Legacy default: if user hasn't specified enders, treat ALL keys as enders
-        # (old behavior: any wrong input drops).
-        return (not self.combo_enders) or (input_name in self.combo_enders)
+        return input_name in self.combo_enders
+
+    def _ender_grace_for(self, input_name: str) -> int:
+        """Return grace in ms for this ender key. Missing keys => 0 (no grace)."""
+        try:
+            return int(self.combo_enders.get(input_name, 0))
+        except Exception:
+            return 0
+
+    def _within_ender_grace(self, input_name: str) -> bool:
+        grace_ms = self._ender_grace_for(input_name)
+        if not grace_ms or grace_ms <= 0:
+            return False
+        if not self.last_input_time:
+            return False
+        now = time.perf_counter()
+        return ((now - self.last_input_time) * 1000) <= float(grace_ms)
 
     def _start_hold(self, input_name: str, required_ms: int, now: float):
         self.hold_in_progress = True
@@ -280,6 +318,79 @@ class ComboTrackerApp:
         self.hold_started_at = 0.0
         self.hold_row_id = None
         self.hold_required_ms = None
+
+    def _start_wait(self, required_ms: int):
+        # Wait timing starts from the last successful step time.
+        self.wait_in_progress = True
+        self.wait_started_at = float(self.last_input_time or time.perf_counter())
+        self.wait_required_ms = required_ms
+        self.wait_until = self.wait_started_at + (required_ms / 1000.0)
+
+        req_s = self._format_wait_requirement(required_ms)
+        self.wait_row_id = self.tree.insert(
+            "",
+            "end",
+            values=(f"wait (≥ {req_s})", "WAITING", "..."),
+            tags=("sep",),
+        )
+        self.tree.yview_moveto(1)
+        self.update_status(f"Waiting ≥ {req_s}...", "green")
+
+    def _reset_wait_state(self):
+        self.wait_in_progress = False
+        self.wait_started_at = 0.0
+        self.wait_until = 0.0
+        self.wait_row_id = None
+        self.wait_required_ms = None
+
+    def _complete_wait(self, now: float, *, fail: bool, reason: str | None = None):
+        """
+        Complete (or fail) the current wait step and advance/reset state.
+        When successful, advances current_index by 1.
+        """
+        required_ms = int(self.wait_required_ms or 0)
+        waited_ms = max(0.0, (now - self.wait_started_at) * 1000)
+        req_s = self._format_wait_requirement(required_ms) if required_ms else "?"
+        label = f"wait (≥ {req_s}, {waited_ms:.0f}ms)"
+
+        total_ms = (now - self.start_time) * 1000 if self.start_time else 0.0
+
+        if fail:
+            if reason:
+                label += f" [{reason}]"
+            if self.wait_row_id:
+                self.tree.item(self.wait_row_id, values=(label, "FAIL", "FAIL"))
+            else:
+                self.tree.insert("", "end", values=(label, "FAIL", "FAIL"))
+            self.tree.yview_moveto(1)
+            self.update_status("Combo Dropped (Too Early)", "red")
+            self.current_index = 0
+            self._reset_hold_state()
+            self._reset_wait_state()
+            return False
+
+        # success
+        split_ms = (now - self.last_input_time) * 1000 if self.last_input_time else 0.0
+        if self.wait_row_id:
+            self.tree.item(self.wait_row_id, values=(label, f"{split_ms:.1f}", f"{total_ms:.1f}"))
+        else:
+            self.record_hit(label, split_ms, total_ms)
+        self.tree.yview_moveto(1)
+
+        self.last_input_time = now
+        self.current_index += 1
+        self._reset_wait_state()
+        return True
+
+    def _maybe_start_wait_step(self):
+        step = self._active_step()
+        if not step:
+            return
+        wait_ms = step.get("wait_ms")
+        if wait_ms is not None:
+            # Only start once per wait step.
+            if not self.wait_in_progress:
+                self._start_wait(int(wait_ms))
 
     def _complete_hold(self, now: float, *, auto: bool):
         """
@@ -313,6 +424,8 @@ class ComboTrackerApp:
 
             self.last_input_time = now
             self.current_index += 1
+            # If next step is a wait, start it immediately for clarity.
+            self._maybe_start_wait_step()
 
             if self.current_index >= len(self.active_combo_steps):
                 self.update_status(f"Combo '{self.active_combo_name}' Complete!", "green")
@@ -347,6 +460,20 @@ class ComboTrackerApp:
 
             target_input = step["input"]
             target_hold_ms = step["hold_ms"]
+            target_wait_ms = step.get("wait_ms")
+
+            # WAIT step handling
+            if target_wait_ms is not None:
+                self._maybe_start_wait_step()
+                now = time.perf_counter()
+                if now < self.wait_until:
+                    # Too early: only ender presses fail; everything else is ignored.
+                    if self._is_combo_ender(input_name):
+                        self._complete_wait(now, fail=True, reason=f"{input_name} too early")
+                    return
+                # Wait satisfied: complete and then re-evaluate this same input against next step.
+                self._complete_wait(now, fail=False)
+                continue
 
             if target_hold_ms is not None and self.hold_in_progress and self.hold_expected_input == target_input:
                 # Ignore repeated press events for the same held input (Windows key-repeat).
@@ -373,6 +500,7 @@ class ComboTrackerApp:
                 if target_hold_ms is None:
                     self.record_hit(input_name, 0, 0)
                     self.current_index += 1
+                    self._maybe_start_wait_step()
                     self.update_status("Recording...", "green")
                 else:
                     self._start_hold(input_name, target_hold_ms, now)
@@ -393,6 +521,7 @@ class ComboTrackerApp:
 
                     self.last_input_time = current_time
                     self.current_index += 1
+                    self._maybe_start_wait_step()
 
                     if self.current_index >= len(self.active_combo_steps):
                         self.update_status(f"Combo '{self.active_combo_name}' Complete!", "green")
@@ -403,6 +532,9 @@ class ComboTrackerApp:
             else:
                 # MISS
                 if self._is_combo_ender(input_name):
+                    # Allow spamming this ender key within its grace window after progress.
+                    if self._within_ender_grace(input_name):
+                        return
                     self.tree.insert("", "end", values=(f"{input_name} (Exp: {target_input})", "FAIL", "FAIL"))
                     self.update_status("Combo Dropped (Wrong Input)", "red")
                     self.tree.yview_moveto(1)
@@ -559,6 +691,7 @@ class ComboTrackerApp:
         self.last_input_time = 0
         self.attempt_counter = 0
         self._reset_hold_state()
+        self._reset_wait_state()
         for item in self.tree.get_children():
             self.tree.delete(item)
 
@@ -598,15 +731,36 @@ class ComboTrackerApp:
 
             self.combo_selector["values"] = list(self.combos.keys())
 
-            enders = data.get("combo_enders", [])
-            if isinstance(enders, list):
-                self.combo_enders = {str(x).strip().lower() for x in enders if str(x).strip()}
-            else:
-                self.combo_enders = set()
+            enders = data.get("combo_enders", {})
+            parsed = {}
+            if isinstance(enders, dict):
+                for k, v in enders.items():
+                    key = str(k).strip().lower()
+                    if not key:
+                        continue
+                    try:
+                        ms = int(float(v))
+                    except Exception:
+                        ms = 0
+                    parsed[key] = max(0, ms)
+            elif isinstance(enders, list):
+                for x in enders:
+                    key = str(x).strip().lower()
+                    if key:
+                        parsed[key] = 0
+            self.combo_enders = parsed
+
             # Populate the settings UI
             self.entry_enders.delete(0, tk.END)
             if self.combo_enders:
-                self.entry_enders.insert(0, ", ".join(sorted(self.combo_enders)))
+                parts = []
+                for k in sorted(self.combo_enders.keys()):
+                    ms = int(self.combo_enders[k])
+                    if ms > 0:
+                        parts.append(f"{k}:{ms/1000.0:.3g}")
+                    else:
+                        parts.append(k)
+                self.entry_enders.insert(0, ", ".join(parts))
 
             last_active = data.get("last_active_combo")
             if last_active in self.combos:
@@ -624,7 +778,7 @@ class ComboTrackerApp:
                 "version": 1,
                 "last_active_combo": self.active_combo_name,
                 "combos": self.combos,
-                "combo_enders": sorted(self.combo_enders),
+                "combo_enders": dict(self.combo_enders),
             }
             self.save_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         except Exception:
@@ -634,19 +788,39 @@ class ComboTrackerApp:
     def apply_enders(self):
         """
         Read the combo enders list from the UI.
-
-        - If the list is empty, we keep legacy behavior: any wrong input drops the combo.
-        - If the list is non-empty, ONLY those inputs can drop the combo when pressed incorrectly.
+        Format: q:0.2,e:0.2,r:5.0,lmb,1:1.0,2:1.0,3:1.0, space
+        - If a timing is omitted for a key, it gets 0 seconds (no grace).
         """
         raw = self.entry_enders.get().strip()
         if not raw:
-            self.combo_enders = set()
+            self.combo_enders = {}
             self.save_combos()
-            self.update_status("Combo enders cleared (any wrong input will drop).", "gray")
+            self.update_status("Combo enders cleared (no keys will end the combo).", "gray")
             return
 
-        tokens = [t.strip().lower() for t in self.split_inputs(raw) if t.strip()]
-        self.combo_enders = set(tokens)
+        parsed = {}
+        for token in self.split_inputs(raw):
+            t = token.strip()
+            if not t:
+                continue
+
+            if ":" in t:
+                k, v = t.split(":", 1)
+                key = k.strip().lower()
+                if not key:
+                    continue
+                try:
+                    sec = float(v.strip())
+                except ValueError:
+                    messagebox.showerror("Error", f"Invalid timing for '{key}'. Use seconds, e.g. {key}:0.2")
+                    return
+                parsed[key] = max(0, int(sec * 1000))
+            else:
+                key = t.strip().lower()
+                if key:
+                    parsed[key] = 0
+
+        self.combo_enders = parsed
         self.save_combos()
         self.update_status("Combo enders applied.", "gray")
 
