@@ -39,6 +39,7 @@ class ComboTrackerApp:
         self.attempt_counter = 0
         # Combo enders: key -> grace_ms (0 means no grace; wrong press drops immediately)
         self.combo_enders = {}
+        self.last_success_input = None
 
         # --- Persistence ---
         self.data_dir = self._get_data_dir()
@@ -49,33 +50,31 @@ class ComboTrackerApp:
         # 1. Add New Combo
         frame_add = tk.LabelFrame(root, text="Add New Combo", padx=10, pady=10)
         frame_add.pack(fill="x", padx=10, pady=5)
+        frame_add.grid_columnconfigure(1, weight=1)
+        frame_add.grid_columnconfigure(2, weight=1)
 
         tk.Label(frame_add, text="Name:").grid(row=0, column=0, sticky="w")
         self.entry_name = tk.Entry(frame_add, width=15)
-        self.entry_name.grid(row=0, column=1, padx=5)
+        self.entry_name.grid(row=0, column=1, columnspan=2, padx=5, sticky="w")
 
-        tk.Label(frame_add, text="Inputs (comma sep):").grid(row=0, column=2, sticky="w")
-        self.entry_keys = tk.Entry(frame_add, width=25)
-        self.entry_keys.grid(row=0, column=3, padx=5)
+        tk.Label(frame_add, text="Inputs (comma sep):").grid(row=1, column=0, sticky="w", pady=(10, 0))
+        self.entry_keys = tk.Entry(frame_add, width=45)
+        self.entry_keys.grid(row=2, column=0, columnspan=3, padx=5, sticky="ew")
         
         # Helper text for mouse inputs
         lbl_help = tk.Label(
             frame_add,
-            text="Use: LMB, RMB, MMB for mouse clicks.\n"
-                 "Hold syntax: hold(space,0.2) or space{0.2}\n"
-                 "Wait syntax: wait:0.5\n"
-                 "Decimals are seconds; append 'ms' for milliseconds.\n"
-                 "Ex: a, w, wait:0.2, LMB, hold(space,0.3), d, RMB",
+            text="LMB, RMB, MMB for mouse. Hold syntax: hold(space,0.2) or space{0.2}\n"
+                 "Wait syntax: wait:0.5 (Decimals are seconds; append 'ms' for milliseconds).\n"
+                 "Example: a, w, wait:0.2, LMB, hold(space,0.3), d, RMB",
             fg="gray",
             font=("Arial", 8),
         )
-        lbl_help.grid(row=1, column=3, sticky="w", padx=5)
+        lbl_help.grid(row=3, column=0, columnspan=3, sticky="w", padx=5, pady=(10, 0))
 
-        tk.Label(frame_add, text="Combo enders (key:seconds):").grid(row=2, column=2, sticky="w")
-        self.entry_enders = tk.Entry(frame_add, width=25)
-        self.entry_enders.grid(row=2, column=3, padx=5, sticky="w")
-        btn_apply_enders = tk.Button(frame_add, text="Apply", command=self.apply_enders)
-        btn_apply_enders.grid(row=2, column=4, padx=5)
+        tk.Label(frame_add, text="Combo enders (key:seconds):").grid(row=4, column=0, sticky="w", pady=(10, 0))
+        self.entry_enders = tk.Entry(frame_add, width=45)
+        self.entry_enders.grid(row=4, column=1, columnspan=2, padx=5, sticky="ew")
 
         btn_save = tk.Button(frame_add, text="Save / Update", command=self.save_combo)
         btn_save.grid(row=0, column=4, padx=5)
@@ -98,6 +97,8 @@ class ComboTrackerApp:
         # 3. Status
         self.lbl_status = tk.Label(root, text="Status: Select a combo to start", font=("Arial", 12, "bold"), fg="gray")
         self.lbl_status.pack(pady=10)
+        self.lbl_min_time = tk.Label(root, text="Fastest possible: —", font=("Arial", 10), fg="gray40")
+        self.lbl_min_time.pack(pady=(0, 10))
 
         # 4. Results Table
         self.tree = ttk.Treeview(root, columns=("Input", "Split (ms)", "Total (ms)"), show="headings")
@@ -118,6 +119,9 @@ class ComboTrackerApp:
         # Load saved combos (if any) and hook window close to save.
         self.load_combos()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+        # Recompute min-time while editing.
+        self.entry_keys.bind("<KeyRelease>", lambda _e: self.update_min_time_from_editor())
 
     # --- Input Normalization ---
 
@@ -226,6 +230,51 @@ class ComboTrackerApp:
 
         return {"input": tl, "hold_ms": None, "wait_ms": None}
 
+    def calc_min_combo_time_ms(self, steps):
+        """
+        Minimum possible completion time for a combo (best case).
+        - press steps: 0ms
+        - wait steps: +wait_ms
+        - hold steps: +hold_ms
+        """
+        total = 0
+        for s in steps or []:
+            if not isinstance(s, dict):
+                continue
+            w = s.get("wait_ms")
+            h = s.get("hold_ms")
+            if w is not None:
+                total += int(w)
+            if h is not None:
+                total += int(h)
+        return max(0, int(total))
+
+    def _format_ms(self, ms: int):
+        ms = int(ms)
+        if ms % 1000 == 0:
+            return f"{ms//1000:d}s ({ms}ms)"
+        return f"{ms/1000.0:.3g}s ({ms}ms)"
+
+    def update_min_time_label(self, steps):
+        if not steps:
+            self.lbl_min_time.config(text="Fastest possible: —")
+            return
+        min_ms = self.calc_min_combo_time_ms(steps)
+        self.lbl_min_time.config(text=f"Fastest possible: {self._format_ms(min_ms)}")
+
+    def update_min_time_from_editor(self):
+        keys_str = self.entry_keys.get().strip()
+        if not keys_str:
+            self.update_min_time_label([])
+            return
+        tokens = [k.strip().lower() for k in self.split_inputs(keys_str) if k.strip()]
+        steps = []
+        for t in tokens:
+            s = self.parse_step(t)
+            if s:
+                steps.append(s)
+        self.update_min_time_label(steps)
+
     def _parse_duration(self, raw: str):
         token = raw.lower().strip()
         if not token:
@@ -291,6 +340,13 @@ class ComboTrackerApp:
             return False
         now = time.perf_counter()
         return ((now - self.last_input_time) * 1000) <= float(grace_ms)
+
+    def _should_ignore_ender_miss(self, input_name: str) -> bool:
+        """
+        Grace windows are meant for "spam" of the most recent correct input (e.g. pressing 2 twice),
+        not for random wrong buttons (e.g. pressing 2 after hitting f).
+        """
+        return (input_name == self.last_success_input) and self._within_ender_grace(input_name)
 
     def _start_hold(self, input_name: str, required_ms: int, now: float):
         self.hold_in_progress = True
@@ -378,6 +434,7 @@ class ComboTrackerApp:
         self.tree.yview_moveto(1)
 
         self.last_input_time = now
+        # wait is not a real input; do not change last_success_input
         self.current_index += 1
         self._reset_wait_state()
         return True
@@ -423,6 +480,7 @@ class ComboTrackerApp:
                 self.record_hit(label, split_ms, total_ms)
 
             self.last_input_time = now
+            self.last_success_input = target_input
             self.current_index += 1
             # If next step is a wait, start it immediately for clarity.
             self._maybe_start_wait_step()
@@ -501,6 +559,7 @@ class ComboTrackerApp:
                     self.record_hit(input_name, 0, 0)
                     self.current_index += 1
                     self._maybe_start_wait_step()
+                    self.last_success_input = input_name
                     self.update_status("Recording...", "green")
                 else:
                     self._start_hold(input_name, target_hold_ms, now)
@@ -520,6 +579,7 @@ class ComboTrackerApp:
                     self.record_hit(input_name, split_ms, total_ms)
 
                     self.last_input_time = current_time
+                    self.last_success_input = input_name
                     self.current_index += 1
                     self._maybe_start_wait_step()
 
@@ -532,8 +592,8 @@ class ComboTrackerApp:
             else:
                 # MISS
                 if self._is_combo_ender(input_name):
-                    # Allow spamming this ender key within its grace window after progress.
-                    if self._within_ender_grace(input_name):
+                    # Allow spamming this ender key ONLY if it's the last successful input.
+                    if self._should_ignore_ender_miss(input_name):
                         return
                     self.tree.insert("", "end", values=(f"{input_name} (Exp: {target_input})", "FAIL", "FAIL"))
                     self.update_status("Combo Dropped (Wrong Input)", "red")
@@ -599,8 +659,12 @@ class ComboTrackerApp:
         self.entry_keys.delete(0, tk.END)
         self.reset_tracking()
         self.lbl_status.config(text="Status: Select a combo to start", fg="gray")
+        self.update_min_time_label([])
 
     def save_combo(self):
+        # Enders are global settings; apply+persist them when saving/updating combos.
+        self.apply_enders(show_status=False)
+
         name = self.entry_name.get().strip()
         keys_str = self.entry_keys.get().strip()
         
@@ -655,6 +719,7 @@ class ComboTrackerApp:
                 if s:
                     steps.append(s)
             self.active_combo_steps = steps
+            self.update_min_time_label(self.active_combo_steps)
 
             # Populate editor fields for easy editing.
             self.entry_name.delete(0, tk.END)
@@ -690,6 +755,7 @@ class ComboTrackerApp:
         self.start_time = 0
         self.last_input_time = 0
         self.attempt_counter = 0
+        self.last_success_input = None
         self._reset_hold_state()
         self._reset_wait_state()
         for item in self.tree.get_children():
@@ -785,7 +851,7 @@ class ComboTrackerApp:
             # Saving is best-effort; don't crash the UI on close.
             pass
 
-    def apply_enders(self):
+    def apply_enders(self, show_status: bool = True):
         """
         Read the combo enders list from the UI.
         Format: q:0.2,e:0.2,r:5.0,lmb,1:1.0,2:1.0,3:1.0, space
@@ -795,7 +861,8 @@ class ComboTrackerApp:
         if not raw:
             self.combo_enders = {}
             self.save_combos()
-            self.update_status("Combo enders cleared (no keys will end the combo).", "gray")
+            if show_status:
+                self.update_status("Combo enders cleared (no keys will end the combo).", "gray")
             return
 
         parsed = {}
@@ -822,7 +889,8 @@ class ComboTrackerApp:
 
         self.combo_enders = parsed
         self.save_combos()
-        self.update_status("Combo enders applied.", "gray")
+        if show_status:
+            self.update_status("Combo enders applied.", "gray")
 
     def on_close(self):
         # Stop listeners first (they run off-thread) to avoid input callbacks after teardown.
@@ -835,6 +903,11 @@ class ComboTrackerApp:
         except Exception:
             pass
 
+        # Persist ender edits even if the user didn't click Save/Update.
+        try:
+            self.apply_enders(show_status=False)
+        except Exception:
+            pass
         self.save_combos()
         self.root.destroy()
 
