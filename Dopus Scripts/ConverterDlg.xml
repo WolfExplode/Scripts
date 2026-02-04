@@ -1,0 +1,31 @@
+<resources>
+  <resource name="ConverterDlg" type="dialog">
+    <dialog fontsize="9" height="200" lang="english" title="Video/Audio Converter" width="360">
+      <!-- Header -->
+      <control halign="left" height="10" name="header_label" title="Convert selected files:" type="static" width="200" x="12" y="10"/>
+
+      <!-- Mode Selection (Dropdown) -->
+      <control halign="left" height="10" name="mode_label" title="Mode:" type="static" width="35" x="12" y="30"/>
+      <control height="14" name="mode_combo" type="combo" width="100" x="55" y="28">
+        <contents>
+          <item text="Video" />
+          <item text="Audio" />
+        </contents>
+      </control>
+
+      <!-- Format Selection (Dropdown) - Will be populated dynamically -->
+      <control halign="left" height="10" name="format_label" title="Format:" type="static" width="35" x="12" y="55"/>
+      <control height="120" name="format_combo" type="combo" width="290" x="55" y="53">
+        <!-- Items added dynamically by script -->
+      </control>
+
+      <!-- Quality/Options -->
+      <control halign="left" height="10" name="quality_label" title="Options:" type="static" width="35" x="12" y="140"/>
+      <control height="14" name="quality_edit" title="standard" type="edit" width="200" x="55" y="138"/>
+
+      <!-- Buttons -->
+      <control close="1" default="yes" height="18" name="ok_btn" title="Convert" type="button" width="70" x="150" y="170"/>
+      <control close="2" height="18" name="cancel_btn" title="Cancel" type="button" width="70" x="230" y="170"/>
+    </dialog>
+  </resource>
+</resources>
