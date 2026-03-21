@@ -1,4 +1,49 @@
-// Video/Audio Converter with XML Dialog - DYNAMIC MODE SWITCHING VERSION (FIXED)
+// Video/Audio Converter with XML Dialog
+var SETTINGS_FILE = null;  // Set on first use via %APPDATA%
+
+function getSettingsPath(shell) {
+    if (!SETTINGS_FILE) {
+        SETTINGS_FILE = shell.ExpandEnvironmentStrings("%APPDATA%") + "\\DOpus_ffmpeg_settings.ini";
+    }
+    return SETTINGS_FILE;
+}
+
+function loadLastSettings(shell, fso) {
+    var path = getSettingsPath(shell);
+    var out = { mode: 0, formatName: "", quality: "23" };
+    try {
+        if (fso.FileExists(path)) {
+            var stream = fso.OpenTextFile(path, 1, false);
+            var content = stream.ReadAll();
+            stream.Close();
+            var lines = content.split("\n");
+            for (var i = 0; i < lines.length; i++) {
+                var line = lines[i].replace(/\r$/, "");
+                var eq = line.indexOf("=");
+                if (eq > 0) {
+                    var key = line.substring(0, eq);
+                    var val = line.substring(eq + 1);
+                    if (key == "mode") out.mode = parseInt(val, 10) || 0;
+                    else if (key == "formatName") out.formatName = val;
+                    else if (key == "quality") out.quality = val;
+                }
+            }
+        }
+    } catch (e) { /* use defaults */ }
+    return out;
+}
+
+function saveLastSettings(shell, fso, mode, formatName, quality) {
+    try {
+        var path = getSettingsPath(shell);
+        var stream = fso.OpenTextFile(path, 2, true);  // ForWriting, Create
+        stream.WriteLine("mode=" + mode);
+        stream.WriteLine("formatName=" + formatName);
+        stream.WriteLine("quality=" + (quality || "23"));
+        stream.Close();
+    } catch (e) { /* ignore */ }
+}
+
 function OnClick(clickData) {
     var cmd = clickData.func.command;
     var selected = clickData.func.sourcetab.selected;
@@ -60,17 +105,24 @@ function OnClick(clickData) {
             formatCtrl.AddItem(formats[i].name, formats[i].name);
         }
 
-        // Select first item (index 0)
+        // Select first item (index 0) unless formatName provided
         if (formats.length > 0) {
             formatCtrl.SelectItem(0);
         }
     }
 
-    // FIX 1: Explicitly set mode to Video (index 0) instead of assuming default
-    modeCtrl.SelectItem(0);  // This ensures modeCtrl.value is valid
-
-    // FIX 2: Now populate formats based on the explicitly set mode
-    populateFormats(true);   // Video mode = true
+    // Restore last used settings
+    var last = loadLastSettings(shell, fso);
+    var modeIdx = (last.mode === 1) ? 1 : 0;
+    modeCtrl.SelectItem(modeIdx);
+    populateFormats(modeIdx === 0);
+    if (last.formatName) {
+        try {
+            var fmtItem = formatCtrl.GetItemByName(last.formatName);
+            if (fmtItem) formatCtrl.SelectItem(fmtItem);
+        } catch (e) { /* keep default selection */ }
+    }
+    qualityCtrl.value = last.quality || "23";
 
     // Show the fully initialized dialog
     dlg.Show();
@@ -118,6 +170,8 @@ function OnClick(clickData) {
 
     var modeIndex = modeItem.index;
     var formatIndex = formatItem.index;
+
+    saveLastSettings(shell, fso, modeIndex, formatItem.name, quality);
 
     DOpus.Output("Mode index: " + modeIndex);
     DOpus.Output("Format index: " + formatIndex);

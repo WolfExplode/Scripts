@@ -1,6 +1,6 @@
 <resources>
   <resource name="ConverterDlg" type="dialog">
-    <dialog fontsize="9" height="200" lang="english" title="Video/Audio Converter" width="360">
+    <dialog fontsize="9" height="210" lang="english" title="Video/Audio Converter" width="360">
       <!-- Header -->
       <control halign="left" height="10" name="header_label" title="Convert selected files:" type="static" width="200" x="12" y="10"/>
 
@@ -19,13 +19,14 @@
         <!-- Items added dynamically by script -->
       </control>
 
-      <!-- Quality/Options -->
-      <control halign="left" height="10" name="quality_label" title="Options:" type="static" width="35" x="12" y="140"/>
-      <control height="14" name="quality_edit" title="standard" type="edit" width="200" x="55" y="138"/>
+      <!-- Quality (CRF) - used by some video formats -->
+      <control halign="left" height="10" name="quality_label" title="Quality (CRF):" type="static" width="80" x="12" y="138"/>
+      <control height="14" name="quality_edit" title="23" type="edit" width="80" x="95" y="136"/>
+      <control halign="left" height="10" name="quality_hint" title="18–28 typical (lower = better quality)" type="static" width="260" x="12" y="154"/>
 
       <!-- Buttons -->
-      <control close="1" default="yes" height="18" name="ok_btn" title="Convert" type="button" width="70" x="150" y="170"/>
-      <control close="2" height="18" name="cancel_btn" title="Cancel" type="button" width="70" x="230" y="170"/>
+      <control close="1" default="yes" height="18" name="ok_btn" title="Convert" type="button" width="70" x="150" y="178"/>
+      <control close="2" height="18" name="cancel_btn" title="Cancel" type="button" width="70" x="230" y="178"/>
     </dialog>
   </resource>
 </resources>
