@@ -59,7 +59,7 @@ function getSettingsPath(shell) {
 }
 
 function loadSettings(shell, fso) {
-    var out = { mode: 0, cookies: 0, metadata: 0, overwrite: 0, update: 0, keepps: 0 };
+    var out = { mode: 0, cookies: 0, metadata: 0, dateprefix: 1, overwrite: 0, update: 0, keepps: 0 };
     try {
         var path = getSettingsPath(shell);
         if (fso.FileExists(path)) {
@@ -79,6 +79,10 @@ function loadSettings(shell, fso) {
                         var mv = parseInt(val, 10);
                         out.metadata = (mv === 0) ? 0 : 1;
                     }
+                    else if (key === "dateprefix") {
+                        var dpv = parseInt(val, 10);
+                        out.dateprefix = (dpv === 0) ? 0 : 1;
+                    }
                     else if (key === "overwrite") out.overwrite = parseInt(val, 10) || 0;
                     else if (key === "update") out.update = parseInt(val, 10) || 0;
                     else if (key === "keepps") out.keepps = parseInt(val, 10) || 0;
@@ -89,13 +93,14 @@ function loadSettings(shell, fso) {
     return out;
 }
 
-function saveSettings(shell, fso, mode, cookies, metadata, overwrite, update, keepps) {
+function saveSettings(shell, fso, mode, cookies, metadata, dateprefix, overwrite, update, keepps) {
     try {
         var path = getSettingsPath(shell);
         var stream = fso.OpenTextFile(path, 2, true);
         stream.WriteLine("mode=" + mode);
         stream.WriteLine("cookies=" + cookies);
         stream.WriteLine("metadata=" + metadata);
+        stream.WriteLine("dateprefix=" + dateprefix);
         stream.WriteLine("overwrite=" + overwrite);
         stream.WriteLine("update=" + update);
         stream.WriteLine("keepps=" + keepps);
@@ -136,6 +141,7 @@ function OnClick(clickData) {
         dlg.control("audio_radio").value = true;
     }
     dlg.control("metadata_check").value = (saved.metadata === 1);
+    dlg.control("dateprefix_check").value = (saved.dateprefix === 1);
     dlg.control("cookies_check").value = (saved.cookies === 1);
     dlg.control("overwrite_check").value = (saved.overwrite === 1);
     dlg.control("update_check").value = (saved.update === 1);
@@ -163,6 +169,7 @@ function OnClick(clickData) {
     var isAudio = dlg.control("audio_radio").value;
     var useCookies = dlg.control("cookies_check").value;
     var includeMetadata = dlg.control("metadata_check").value;
+    var datePrefix = dlg.control("dateprefix_check").value;
     var allowOverwrite = dlg.control("overwrite_check").value;
     var doUpdate = dlg.control("update_check").value;
     var keepPsOpen = dlg.control("keepps_check").value;
@@ -172,23 +179,24 @@ function OnClick(clickData) {
         return;
     }
 
-    saveSettings(shell, fso, isAudio ? 0 : 1, useCookies ? 1 : 0, includeMetadata ? 1 : 0, allowOverwrite ? 1 : 0, doUpdate ? 1 : 0, keepPsOpen ? 1 : 0);
+    saveSettings(shell, fso, isAudio ? 0 : 1, useCookies ? 1 : 0, includeMetadata ? 1 : 0, datePrefix ? 1 : 0, allowOverwrite ? 1 : 0, doUpdate ? 1 : 0, keepPsOpen ? 1 : 0);
 
     var cookiesArg = useCookies ? " --cookies-from-browser firefox" : "";
     var overwriteArg = allowOverwrite ? " --force-overwrites" : " --no-overwrites";
     // Lets yt-dlp download EJS solver scripts (needed for YouTube + Deno / JS challenges; see yt-dlp wiki EJS)
     var ejsArg = " --remote-components ejs:github";
-    // URL then description -> embedded comment (see yt-dlp wiki / issue #11168)
-    var metaCommentParse = " --parse-metadata \"%(webpage_url)s %(description)s:(?s)(?P<meta_comment>.+)\"";
-    var metaAudio = " --extract-audio --audio-format best --add-metadata --embed-thumbnail --embed-subs --parse-metadata \":(?P<chapters>)\"" + metaCommentParse;
-    var metaVideo = " --add-metadata --embed-thumbnail --write-auto-subs --embed-subs" + metaCommentParse;
+    var metaAudio = " --extract-audio --audio-format best --add-metadata --embed-thumbnail --embed-subs --parse-metadata \":(?P<chapters>)\"";
+    var metaVideo = " --add-metadata --embed-thumbnail --write-auto-subs --embed-subs";
+    var outTemplate = datePrefix
+        ? '"[%(upload_date>%m-%d-%Y)s] %(title)s.%(ext)s"'
+        : '"%(title)s.%(ext)s"';
 
     // Build yt-dlp argument string
     // Written into a .ps1 file so % format specifiers are never touched by cmd.exe
     // Plain mode: no metadata/embed flags; with metadata: previous full options
     var ytArgs;
     if (isAudio) {
-        ytArgs = '-o "%(title)s.%(ext)s"'
+        ytArgs = "-o " + outTemplate
                + ' -f bestaudio'
                + overwriteArg
                + ejsArg
@@ -196,7 +204,7 @@ function OnClick(clickData) {
                + cookiesArg
                + ' "' + finalUrl + '"';
     } else {
-        ytArgs = '-o "[%(upload_date>%m-%d-%Y)s] %(title)s.%(ext)s"'
+        ytArgs = "-o " + outTemplate
                + overwriteArg
                + ejsArg
                + (includeMetadata ? metaVideo : "")
@@ -221,7 +229,7 @@ function OnClick(clickData) {
 
     DOpus.Output("yt-dlp | URL: " + finalUrl);
     DOpus.Output("yt-dlp | Dest: " + destPath);
-    DOpus.Output("yt-dlp | Mode: " + (isAudio ? "Audio" : "Video") + " | Metadata: " + includeMetadata + " | Cookies: " + useCookies + " | Overwrite: " + allowOverwrite + " | Update check: " + doUpdate + " | Keep PS: " + keepPsOpen);
+    DOpus.Output("yt-dlp | Mode: " + (isAudio ? "Audio" : "Video") + " | Metadata: " + includeMetadata + " | Date prefix: " + datePrefix + " | Cookies: " + useCookies + " | Overwrite: " + allowOverwrite + " | Update check: " + doUpdate + " | Keep PS: " + keepPsOpen);
 
     var psCmd = keepPsOpen
         ? 'powershell -NoExit -ExecutionPolicy Bypass -File "' + tempPs1 + '"'

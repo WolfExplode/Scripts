@@ -1,6 +1,6 @@
 <resources>
   <resource name="YtDlpDlg" type="dialog">
-    <dialog fontsize="9" height="214" lang="english" title="yt-dlp Downloader" width="430">
+    <dialog fontsize="9" height="232" lang="english" title="yt-dlp Downloader" width="430">
 
       <!-- URL -->
       <control halign="left" height="10" name="url_label" title="URL:" type="static" width="30" x="12" y="12"/>
@@ -14,21 +14,24 @@
       <!-- Metadata -->
       <control height="12" name="metadata_check" title="Include metadata (embed thumbnail, subs, tags, chapters)" type="check" width="406" x="12" y="72"/>
 
+      <!-- Date prefix -->
+      <control height="12" name="dateprefix_check" title="Prefix filename with upload date [mm-dd-yyyy] before title" type="check" width="406" x="12" y="92"/>
+
       <!-- Cookies -->
-      <control height="12" name="cookies_check" title="Use Firefox cookies (--cookies-from-browser firefox)" type="check" width="390" x="12" y="92"/>
+      <control height="12" name="cookies_check" title="Use Firefox cookies (--cookies-from-browser firefox)" type="check" width="390" x="12" y="112"/>
 
       <!-- Overwrite -->
-      <control height="12" name="overwrite_check" title="Overwrite if file already exists (--force-overwrites)" type="check" width="406" x="12" y="110"/>
+      <control height="12" name="overwrite_check" title="Overwrite if file already exists (--force-overwrites)" type="check" width="406" x="12" y="130"/>
 
       <!-- Update -->
-      <control height="12" name="update_check" title="Update yt-dlp if not latest (pip install --upgrade yt-dlp)" type="check" width="406" x="12" y="128"/>
+      <control height="12" name="update_check" title="Update yt-dlp if not latest (pip install --upgrade yt-dlp)" type="check" width="406" x="12" y="148"/>
 
       <!-- PowerShell -->
-      <control height="12" name="keepps_check" title="Keep PowerShell window open when finished (-NoExit)" type="check" width="406" x="12" y="146"/>
+      <control height="12" name="keepps_check" title="Keep PowerShell window open when finished (-NoExit)" type="check" width="406" x="12" y="166"/>
 
       <!-- Buttons -->
-      <control close="1" default="yes" height="18" name="ok_btn" title="Download" type="button" width="80" x="258" y="178"/>
-      <control close="2" height="18" name="cancel_btn" title="Cancel" type="button" width="66" x="352" y="178"/>
+      <control close="1" default="yes" height="18" name="ok_btn" title="Download" type="button" width="80" x="258" y="198"/>
+      <control close="2" height="18" name="cancel_btn" title="Cancel" type="button" width="66" x="352" y="198"/>
 
     </dialog>
   </resource>
