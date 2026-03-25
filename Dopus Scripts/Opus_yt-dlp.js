@@ -6,6 +6,16 @@ function trimStr(s) {
     return String(s).replace(/^\s+|\s+$/g, "");
 }
 
+// Literal text before %(…) in -o template; % -> %%, " -> ' so -o "…" stays valid
+function escapeYtdlpOutputPrefix(s) {
+    var t = trimStr(s);
+    if (!t) return "";
+    t = t.replace(/%/g, "%%");
+    t = t.replace(/"/g, "'");
+    t = t.replace(/[\r\n]/g, " ");
+    return t;
+}
+
 // PowerShell: compare yt-dlp --version to GitHub latest; pip upgrade only if needed
 function writeYtDlpUpdateBlock(ps1) {
     var lines = [
@@ -59,7 +69,7 @@ function getSettingsPath(shell) {
 }
 
 function loadSettings(shell, fso) {
-    var out = { mode: 0, cookies: 0, metadata: 0, dateprefix: 1, overwrite: 0, update: 0, keepps: 0 };
+    var out = { mode: 0, cookies: 0, metadata: 0, dateprefix: 1, fileprefix: "", overwrite: 0, update: 0, keepps: 0 };
     try {
         var path = getSettingsPath(shell);
         if (fso.FileExists(path)) {
@@ -83,6 +93,7 @@ function loadSettings(shell, fso) {
                         var dpv = parseInt(val, 10);
                         out.dateprefix = (dpv === 0) ? 0 : 1;
                     }
+                    else if (key === "fileprefix") out.fileprefix = val;
                     else if (key === "overwrite") out.overwrite = parseInt(val, 10) || 0;
                     else if (key === "update") out.update = parseInt(val, 10) || 0;
                     else if (key === "keepps") out.keepps = parseInt(val, 10) || 0;
@@ -93,7 +104,7 @@ function loadSettings(shell, fso) {
     return out;
 }
 
-function saveSettings(shell, fso, mode, cookies, metadata, dateprefix, overwrite, update, keepps) {
+function saveSettings(shell, fso, mode, cookies, metadata, dateprefix, fileprefix, overwrite, update, keepps) {
     try {
         var path = getSettingsPath(shell);
         var stream = fso.OpenTextFile(path, 2, true);
@@ -101,6 +112,7 @@ function saveSettings(shell, fso, mode, cookies, metadata, dateprefix, overwrite
         stream.WriteLine("cookies=" + cookies);
         stream.WriteLine("metadata=" + metadata);
         stream.WriteLine("dateprefix=" + dateprefix);
+        stream.WriteLine("fileprefix=" + fileprefix.replace(/[\r\n]/g, " "));
         stream.WriteLine("overwrite=" + overwrite);
         stream.WriteLine("update=" + update);
         stream.WriteLine("keepps=" + keepps);
@@ -135,6 +147,7 @@ function OnClick(clickData) {
 
     // Restore last settings
     var saved = loadSettings(shell, fso);
+    dlg.control("prefix_edit").value = saved.fileprefix || "";
     if (saved.mode === 1) {
         dlg.control("video_radio").value = true;
     } else {
@@ -166,6 +179,8 @@ function OnClick(clickData) {
 
     // Read final values from controls
     var finalUrl = trimStr(dlg.control("url_edit").value);
+    var filePrefixRaw = String(dlg.control("prefix_edit").value);
+    var filePrefixEsc = escapeYtdlpOutputPrefix(filePrefixRaw);
     var isAudio = dlg.control("audio_radio").value;
     var useCookies = dlg.control("cookies_check").value;
     var includeMetadata = dlg.control("metadata_check").value;
@@ -179,7 +194,7 @@ function OnClick(clickData) {
         return;
     }
 
-    saveSettings(shell, fso, isAudio ? 0 : 1, useCookies ? 1 : 0, includeMetadata ? 1 : 0, datePrefix ? 1 : 0, allowOverwrite ? 1 : 0, doUpdate ? 1 : 0, keepPsOpen ? 1 : 0);
+    saveSettings(shell, fso, isAudio ? 0 : 1, useCookies ? 1 : 0, includeMetadata ? 1 : 0, datePrefix ? 1 : 0, trimStr(filePrefixRaw), allowOverwrite ? 1 : 0, doUpdate ? 1 : 0, keepPsOpen ? 1 : 0);
 
     var cookiesArg = useCookies ? " --cookies-from-browser firefox" : "";
     var overwriteArg = allowOverwrite ? " --force-overwrites" : " --no-overwrites";
@@ -187,9 +202,11 @@ function OnClick(clickData) {
     var ejsArg = " --remote-components ejs:github";
     var metaAudio = " --extract-audio --audio-format best --add-metadata --embed-thumbnail --embed-subs --parse-metadata \":(?P<chapters>)\"";
     var metaVideo = " --add-metadata --embed-thumbnail --write-auto-subs --embed-subs";
-    var outTemplate = datePrefix
-        ? '"[%(upload_date>%m-%d-%Y)s] %(title)s.%(ext)s"'
-        : '"%(title)s.%(ext)s"';
+    var innerCore = datePrefix
+        ? "[%(upload_date>%m-%d-%Y)s] %(title)s.%(ext)s"
+        : "%(title)s.%(ext)s";
+    var inner = filePrefixEsc ? (filePrefixEsc + innerCore) : innerCore;
+    var outTemplate = '"' + inner + '"';
 
     // Build yt-dlp argument string
     // Written into a .ps1 file so % format specifiers are never touched by cmd.exe
@@ -229,7 +246,7 @@ function OnClick(clickData) {
 
     DOpus.Output("yt-dlp | URL: " + finalUrl);
     DOpus.Output("yt-dlp | Dest: " + destPath);
-    DOpus.Output("yt-dlp | Mode: " + (isAudio ? "Audio" : "Video") + " | Metadata: " + includeMetadata + " | Date prefix: " + datePrefix + " | Cookies: " + useCookies + " | Overwrite: " + allowOverwrite + " | Update check: " + doUpdate + " | Keep PS: " + keepPsOpen);
+    DOpus.Output("yt-dlp | Mode: " + (isAudio ? "Audio" : "Video") + " | Metadata: " + includeMetadata + " | Date prefix: " + datePrefix + " | File prefix: " + (trimStr(filePrefixRaw) ? trimStr(filePrefixRaw) : "(none)") + " | Cookies: " + useCookies + " | Overwrite: " + allowOverwrite + " | Update check: " + doUpdate + " | Keep PS: " + keepPsOpen);
 
     var psCmd = keepPsOpen
         ? 'powershell -NoExit -ExecutionPolicy Bypass -File "' + tempPs1 + '"'
