@@ -5,6 +5,7 @@ Same relative folder + peeled basename must match (e.g. source `foo.mkv` ↔ tar
 Also: move all `.jpg` files from source → target preserving the same relative paths (removes them from source).
 Also: read `Copy and Transfer.txt` in the source folder; each line is a `.mp4.jpg` / `.wmv.jpg` thumbnail name — strip `.jpg` and copy the corresponding video into the target tree (same relative path; does not remove from source).
 Also: strip chosen characters from filenames under the target (stem only), trim spaces, remove trailing dots before the extension,
+collapse a duplicated final extension (e.g. ``.mp4.mp4`` → ``.mp4``; case-insensitive),
 and remove trailing copy suffixes like `` (1)`` / `` (23)`` (1–3 digits; avoids `` (2024)``-style years).
 Also: under the target tree, append `` [immediate parent folder]`` before the file extension (files directly under the target root are skipped).
 
@@ -295,15 +296,34 @@ def scan_parent_folder_tag(source_root: Path, target_root: Path) -> ParentFolder
     )
 
 
+def normalize_duplicate_trailing_extensions(basename: str) -> str:
+    """
+    Collapse repeated final extension: ``foo.mp4.mp4`` → ``foo.mp4`` (any depth; extension match is case-insensitive).
+    """
+    if not basename or basename.endswith(("/", "\\")):
+        return basename
+    p = Path(basename)
+    name = basename
+    while p.suffix and p.stem:
+        if Path(p.stem).suffix.casefold() != p.suffix.casefold():
+            break
+        name = p.stem
+        p = Path(name)
+    return name
+
+
 def transform_title_filename(filename: str, strip_chars: str) -> Optional[str]:
     """
     Remove each character in strip_chars from the stem; remove trailing `` (n)`` copy suffixes
     (1–3 digit n); trim spaces; strip trailing dots before the extension.
+    Collapse a duplicated final extension (e.g. ``.mp4.mp4`` → ``.mp4``) before other stem rules.
     Returns new full filename if changed, else None. None if stem becomes empty.
     """
     if not filename or filename.endswith(("/", "\\")):
         return None
-    p = Path(filename)
+    original = Path(filename).name
+    collapsed = normalize_duplicate_trailing_extensions(original)
+    p = Path(collapsed)
     suffix = p.suffix
     stem = p.stem
     if not stem and not suffix:
@@ -318,7 +338,7 @@ def transform_title_filename(filename: str, strip_chars: str) -> Optional[str]:
     if not new_stem:
         return None
     new_name = new_stem + suffix
-    if new_name == filename:
+    if new_name == original:
         return None
     return new_name
 
@@ -634,7 +654,8 @@ def run_gui() -> None:
                 frm,
                 text=(
                     "Strip from titles (Target only): remove each character you type below from the "
-                    "filename stem; trim spaces; remove trailing dots before the extension; and remove "
+                    "filename stem; trim spaces; remove trailing dots before the extension; collapse a "
+                    "duplicated final extension (e.g. video.mp4.mp4 → video.mp4); and remove "
                     "trailing copy suffixes like \" (1)\" or \" (12)\" (up to 3 digits in parens, "
                     "so years like \" (2024)\" are not removed). "
                     "Example: 「Juno Bike Exercise」..mp4 with 「」 stripped → Juno Bike Exercise.mp4; "
@@ -645,7 +666,7 @@ def run_gui() -> None:
             ).grid(row=7, column=0, columnspan=2, sticky="ew", pady=(0, 2))
             ttk.Label(
                 frm,
-                text="Characters to strip from stem (optional; copy-number suffix is always checked):",
+                text="Characters to strip from stem (optional; duplicate extension + copy-number suffix always checked):",
             ).grid(row=8, column=0, sticky="w", pady=(0, 2))
             title_strip_row = ttk.Frame(frm)
             title_strip_row.grid(row=9, column=0, columnspan=2, sticky="ew", pady=(0, 6))
@@ -879,7 +900,7 @@ def run_gui() -> None:
             if not ts.planned:
                 messagebox.showinfo(
                     "Nothing to do",
-                    "No target files need renaming (no strip chars / copy suffix changes apply). "
+                    "No target files need renaming (no strip chars / duplicate extension / copy suffix changes apply). "
                     "Use Preview for details.",
                 )
                 return
@@ -888,6 +909,7 @@ def run_gui() -> None:
                 "Confirm title strip",
                 f"Rename {len(ts.planned)} file(s) under the target folder?\n\n"
                 "Only the filename changes (same folder): optional characters removed from the stem, "
+                "duplicated final extensions collapsed (e.g. .mp4.mp4 → .mp4), "
                 "trailing \" (n)\" copy suffixes removed (1–3 digits), trailing dots trimmed.\n\n"
                 f"Skipped this run: {len(ts.skipped_collision)} collision(s) (name already exists).",
             ):
