@@ -52,12 +52,16 @@ function fileExtLower(name) {
 
 var THUMB_IMAGE_EXT = { ".jpg": 1, ".jpeg": 1, ".png": 1, ".webp": 1, ".bmp": 1, ".gif": 1, ".tif": 1, ".tiff": 1 };
 var THUMB_VIDEO_EXT = { ".mp4": 1, ".mkv": 1, ".mov": 1, ".avi": 1, ".webm": 1, ".m4v": 1, ".wmv": 1 };
+var THUMB_AUDIO_EXT = { ".mp3": 1, ".m4a": 1, ".aac": 1, ".flac": 1, ".wav": 1, ".ogg": 1, ".opus": 1, ".mka": 1, ".wma": 1, ".ac3": 1, ".eac3": 1 };
 
 function isThumbImageName(name) {
     return THUMB_IMAGE_EXT[fileExtLower(name)] == 1;
 }
 function isThumbVideoName(name) {
     return THUMB_VIDEO_EXT[fileExtLower(name)] == 1;
+}
+function isThumbAudioName(name) {
+    return THUMB_AUDIO_EXT[fileExtLower(name)] == 1;
 }
 
 function mimeTypeForImageExt(ext) {
@@ -70,15 +74,12 @@ function mimeTypeForImageExt(ext) {
     return "image/jpeg";
 }
 
-// Use shell.Popup here: DOpus.dlg.message/request fails (0x8000ffff) while the converter's detached dialog owns DOpus.dlg.
+// Log only (no modal dialogs): shell.Popup / DOpus.dlg.message are not used.
 function thumbInfo(shell, text, title) {
-    shell.Popup(text, 0, title, 64);
+    DOpus.Output("[" + title + "] " + text);
 }
 function thumbErr(shell, text, title) {
-    shell.Popup(text, 0, title, 16);
-}
-function thumbOkCancel(shell, text, title) {
-    return shell.Popup(text, 0, title, 1) == 1;
+    DOpus.Output("[" + title + " ERROR] " + text);
 }
 
 /** Extract embedded cover/thumbnail from a single selected video and save it as a .jpg next to the video. */
@@ -121,9 +122,9 @@ function runExtractThumbnail(clickData, fso, shell) {
         var exitCode = shell.Run(exec, 0, true);
         if (!fso.FileExists(outPath)) {
             if (ext == ".mkv") {
-                shell.Popup("No cover attachment found in this MKV file.\n\nThe file may not have an embedded cover image.", 0, "Extract thumbnail", 48);
+                thumbErr(shell, "No cover attachment found in this MKV file. The file may not have an embedded cover image.", "Extract thumbnail");
             } else {
-                thumbErr(shell, "No embedded thumbnail found, or ffmpeg failed (exit code " + exitCode + ").\n\nSee DOpus Script Output for details.", "Extract thumbnail");
+                thumbErr(shell, "No embedded thumbnail found, or ffmpeg failed (exit code " + exitCode + "). See DOpus Script Output for details.", "Extract thumbnail");
             }
             return;
         }
@@ -327,13 +328,6 @@ function runAudioToMono(clickData, fso, shell) {
         }
         list.push(it);
     }
-    if (!thumbOkCancel(
-        shell,
-        "Re-encode audio to mono for " + list.length + " file(s)?\n\nVideo is copied (not re-encoded). Container/extension unchanged.",
-        "Audio to mono"
-    )) {
-        return;
-    }
 
     var ok = 0;
     var fail = 0;
@@ -405,9 +399,236 @@ function runAudioToMono(clickData, fso, shell) {
     if (fail > 0 && ok === 0) {
         thumbErr(shell, "All " + fail + " file(s) failed. See DOpus Script Output.", "Audio to mono");
     } else if (fail > 0) {
-        thumbInfo(shell, "Finished with errors.\n\nOK: " + ok + "\nFailed: " + fail + "\n\nDetails in Script Output.", "Audio to mono");
+        thumbInfo(shell, "Finished with errors. OK: " + ok + ", Failed: " + fail + ". Details in Script Output.", "Audio to mono");
     } else {
-        thumbInfo(shell, "Audio to mono finished.\n\nFiles updated: " + ok, "Audio to mono");
+        thumbInfo(shell, "Audio to mono finished. Files updated: " + ok, "Audio to mono");
+    }
+    try {
+        clickData.func.command.RunCommand("Go REFRESH");
+    } catch (eRf) { /* ignore */ }
+}
+
+/** Split: demux with -c copy; original path becomes video-only, audio → stem.audio.mka. Combine: one video + one audio → remux to video’s path (-c copy), delete audio. */
+function runSplitAvCopy(clickData, fso, shell) {
+    var logTitle = "Split/combine AV";
+    var sel = clickData.func.sourcetab.selected_files;
+    if (sel.count < 1) {
+        thumbErr(shell, "Select one or more video files, or one video plus one audio file.", logTitle);
+        return;
+    }
+
+    var vidItems = [];
+    var audItems = [];
+    var badNames = [];
+    var en = new Enumerator(sel);
+    for (; !en.atEnd(); en.moveNext()) {
+        var it = en.item();
+        var n = it.name + "";
+        if (isThumbVideoName(n)) {
+            vidItems.push(it);
+        } else if (isThumbAudioName(n)) {
+            audItems.push(it);
+        } else {
+            badNames.push(n);
+        }
+    }
+
+    if (badNames.length > 0) {
+        thumbErr(shell, "Unsupported file type(s): " + badNames.join(", "), logTitle);
+        return;
+    }
+
+    if (audItems.length > 0) {
+        if (sel.count != 2 || vidItems.length != 1 || audItems.length != 1) {
+            thumbErr(shell, "To combine: select exactly one video and one audio (nothing else). To split: select only video file(s).", logTitle);
+            return;
+        }
+        var vidItem = vidItems[0];
+        var audItem = audItems[0];
+        var vidPath = vidItem.realpath + "";
+        var audPath = audItem.realpath + "";
+        var folder = vidItem.path + "";
+        var ext = fileExtLower(vidItem.name + "");
+        var stem = vidItem.name_stem + "";
+        var muxTmp = folder + "\\" + stem + ".__opus_mux_tmp" + ext;
+        var bakPath = folder + "\\" + stem + ".__opus_mux_orig" + ext;
+        if (fso.FileExists(muxTmp)) {
+            try {
+                fso.DeleteFile(muxTmp);
+            } catch (eMt0) { /* ignore */ }
+        }
+        if (fso.FileExists(bakPath)) {
+            try {
+                fso.DeleteFile(bakPath);
+            } catch (eBk0) { /* ignore */ }
+        }
+        var execMux = 'ffmpeg.exe -y -i "' + vidPath + '" -i "' + audPath + '" -map 0:v:0 -map 1:a:0 -c copy -shortest "' + muxTmp + '"';
+        DOpus.Output(logTitle + " (combine): " + execMux);
+        try {
+            var muxExit = shell.Run(execMux, 0, true);
+            if (muxExit != 0 || !fso.FileExists(muxTmp)) {
+                thumbErr(shell, "Combine failed (ffmpeg exit " + muxExit + "). Container/codec pair may be incompatible with stream copy. See Script Output.", logTitle);
+            } else {
+                try {
+                    if (fso.FileExists(audPath)) {
+                        fso.DeleteFile(audPath);
+                    }
+                } catch (exDelA) {
+                    DOpus.Output(logTitle + " (combine): could not delete audio source: " + audPath + " — " + exDelA.message);
+                }
+                var muxDone = false;
+                try {
+                    fso.MoveFile(vidPath, bakPath);
+                } catch (exRen) {
+                    DOpus.Output(logTitle + " (combine): could not rename video aside: " + vidPath + " — " + exRen.message);
+                    try {
+                        fso.DeleteFile(muxTmp);
+                    } catch (eCl) { /* ignore */ }
+                    thumbErr(shell, "Combine output was discarded (could not replace video). See Script Output.", logTitle);
+                }
+                if (fso.FileExists(muxTmp) && fso.FileExists(bakPath)) {
+                    try {
+                        fso.MoveFile(muxTmp, vidPath);
+                        muxDone = true;
+                    } catch (exMv) {
+                        try {
+                            fso.MoveFile(bakPath, vidPath);
+                        } catch (eRest) { /* ignore */ }
+                        try {
+                            fso.DeleteFile(muxTmp);
+                        } catch (eCl2) { /* ignore */ }
+                        thumbErr(shell, "Combine: could not move mux to final path; restored video-only file.", logTitle);
+                    }
+                }
+                if (muxDone) {
+                    try {
+                        fso.DeleteFile(bakPath);
+                    } catch (eDelB) { /* ignore */ }
+                    var audGone = !fso.FileExists(audPath);
+                    var sumMsg = "Remuxed to: " + vidPath + " (same name as video input).";
+                    if (!audGone) {
+                        sumMsg += " Audio file could not be deleted — see Script Output.";
+                    }
+                    thumbInfo(shell, sumMsg, logTitle);
+                }
+            }
+        } catch (exM) {
+            thumbErr(shell, "Combine error: " + exM.message, logTitle);
+        }
+        try {
+            clickData.func.command.RunCommand("Go REFRESH");
+        } catch (eRf0) { /* ignore */ }
+        return;
+    }
+
+    if (vidItems.length < 1) {
+        thumbErr(shell, "No video file in selection.", logTitle);
+        return;
+    }
+
+    var list = vidItems;
+
+    var ok = 0;
+    var partial = 0;
+    var fail = 0;
+
+    for (var i = 0; i < list.length; i++) {
+        var vidItem = list[i];
+        var vidPath = vidItem.realpath + "";
+        var folder = vidItem.path + "";
+        var ext = fileExtLower(vidItem.name + "");
+        var stem = vidItem.name_stem + "";
+
+        var vidTmp = folder + "\\" + stem + ".__opus_split_v_tmp" + ext;
+        var bakPath = folder + "\\" + stem + ".__opus_split_orig" + ext;
+        if (fso.FileExists(vidTmp)) {
+            try {
+                fso.DeleteFile(vidTmp);
+            } catch (eTv0) { /* ignore */ }
+        }
+        if (fso.FileExists(bakPath)) {
+            try {
+                fso.DeleteFile(bakPath);
+            } catch (eBk0) { /* ignore */ }
+        }
+
+        var audOut = folder + "\\" + stem + ".audio.mka";
+        var ac = 1;
+        while (fso.FileExists(audOut)) {
+            audOut = folder + "\\" + stem + ".audio_" + ac + ".mka";
+            ac++;
+        }
+
+        var execV = 'ffmpeg.exe -y -i "' + vidPath + '" -map 0:v:0 -c copy -an "' + vidTmp + '"';
+        var execA = 'ffmpeg.exe -y -i "' + vidPath + '" -map 0:a:0 -c copy -vn "' + audOut + '"';
+
+        DOpus.Output(logTitle + " (split video): " + execV);
+        try {
+            var ev = shell.Run(execV, 0, true);
+            if (ev != 0 || !fso.FileExists(vidTmp)) {
+                DOpus.Output(logTitle + ": video demux failed (exit " + ev + "): " + vidItem.name);
+                fail++;
+                continue;
+            }
+        } catch (exV) {
+            DOpus.Output(logTitle + " video error on " + vidItem.name + ": " + exV.message);
+            fail++;
+            continue;
+        }
+
+        var audioOk = false;
+        DOpus.Output(logTitle + " (split audio): " + execA);
+        try {
+            var ea = shell.Run(execA, 0, true);
+            if (ea != 0 || !fso.FileExists(audOut)) {
+                DOpus.Output(logTitle + ": audio demux failed or no audio stream (exit " + ea + "): " + vidItem.name);
+            } else {
+                audioOk = true;
+            }
+        } catch (exA) {
+            DOpus.Output(logTitle + " audio error on " + vidItem.name + ": " + exA.message);
+        }
+
+        try {
+            fso.MoveFile(vidPath, bakPath);
+        } catch (eRen) {
+            DOpus.Output(logTitle + ": could not rename original (in use?): " + vidItem.name + " — left temp: " + vidTmp);
+            try {
+                fso.DeleteFile(vidTmp);
+            } catch (eDelT) { /* ignore */ }
+            fail++;
+            continue;
+        }
+        try {
+            fso.MoveFile(vidTmp, vidPath);
+        } catch (eMv) {
+            try {
+                fso.MoveFile(bakPath, vidPath);
+            } catch (eRest) { /* ignore */ }
+            DOpus.Output(logTitle + ": could not replace with video-only; restored original: " + vidItem.name);
+            fail++;
+            continue;
+        }
+        try {
+            fso.DeleteFile(bakPath);
+        } catch (eDelB) { /* leave backup if locked */ }
+
+        if (audioOk) {
+            ok++;
+        } else {
+            partial++;
+        }
+    }
+
+    if (fail > 0 && ok === 0 && partial === 0) {
+        thumbErr(shell, "All " + fail + " file(s) failed (video demux or replace). See DOpus Script Output.", logTitle);
+    } else {
+        var msg = "Split finished (original → video-only + .audio.mka). Full: " + ok + ", Video-only file (no separate audio): " + partial;
+        if (fail > 0) {
+            msg += ", Failed: " + fail;
+        }
+        msg += ". Details in Script Output.";
+        thumbInfo(shell, msg, logTitle);
     }
     try {
         clickData.func.command.RunCommand("Go REFRESH");
@@ -549,6 +770,13 @@ function OnClick(clickData) {
             break;
         }
 
+        if (msg.event == "click" && msg.control == "split_av_btn") {
+            runSplitAvCopy(clickData, fso, shell);
+            dlg.EndDlg("0");
+            dialogResult = dlg.result;
+            break;
+        }
+
         // Handle selection change events
         if (msg.event == "selchange") {
             if (msg.control == "mode_combo") {
@@ -573,7 +801,7 @@ function OnClick(clickData) {
     }
 
     if (tab.selstats.selfiles == 0) {
-        DOpus.dlg.message("No files selected to convert. Select files in the lister, then run the converter again.", "Converter");
+        DOpus.Output("[Converter ERROR] No files selected to convert. Select files in the lister, then run the converter again.");
         return;
     }
 
@@ -598,7 +826,7 @@ function OnClick(clickData) {
     var formats = isVideo ? videoFormats : audioFormats;
 
     if (formatIndex < 0 || formatIndex >= formats.length) {
-        DOpus.dlg.message("Invalid format selected", "Error");
+        DOpus.Output("[Converter ERROR] Invalid format selected");
         return;
     }
 
@@ -654,11 +882,11 @@ function OnClick(clickData) {
         }
     }
 
-    var summary = "Conversion finished.\n\nSuccessful: " + processed;
+    var summary = "Conversion finished. Successful: " + processed;
     if (failed > 0) {
-        summary += "\nFailed: " + failed;
+        summary += ", Failed: " + failed;
     }
-    DOpus.dlg.message(summary, "Converter");
+    DOpus.Output("[Converter] " + summary);
 
     // Refresh file display
     clickData.func.command.RunCommand("Go REFRESH");
