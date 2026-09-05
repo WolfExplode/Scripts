@@ -9,34 +9,56 @@
 </head>
 <body class="lab-find">
 
+<svg class="icon-sprite" aria-hidden="true" focusable="false">
+  <symbol id="icon-palette" viewBox="0 0 24 24">
+    <path d="M12 3a9 9 0 0 0 0 18h1.2a1.8 1.8 0 0 0 0-3.6h-.8a1.8 1.8 0 0 1 0-3.6H15a6 6 0 0 0 0-12.8A9 9 0 0 0 12 3Z"/>
+    <circle cx="7.5" cy="10" r="1"/><circle cx="10" cy="6.5" r="1"/><circle cx="15" cy="6.5" r="1"/><circle cx="18" cy="10" r="1"/>
+  </symbol>
+  <symbol id="icon-chevron-up" viewBox="0 0 24 24"><path d="m6 14 6-6 6 6"/></symbol>
+  <symbol id="icon-chevron-down" viewBox="0 0 24 24"><path d="m6 10 6 6 6-6"/></symbol>
+  <symbol id="icon-archive-down" viewBox="0 0 24 24"><path d="M4 8.5h16M5 8.5l1 11h12l1-11M7 5h10l2 3.5H5L7 5Zm5 7v4m0 0-2-2m2 2 2-2"/></symbol>
+  <symbol id="icon-trash" viewBox="0 0 24 24"><path d="M5 7h14m-9-3h4l1 3H9l1-3Zm-3 3 1 13h8l1-13M10 11v8m4-8v8"/></symbol>
+  <symbol id="icon-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="icon-settings" viewBox="0 0 24 24"><path d="M12 15.25A3.25 3.25 0 1 0 12 8.75a3.25 3.25 0 0 0 0 6.5Zm0-11.75 1.1 2.15 2.4.45 1.7-1.4 1.7 1.7-1.4 1.7.45 2.4 2.15 1.1v2.4l-2.15 1.1-.45 2.4 1.4 1.7-1.7 1.7-1.7-1.4-2.4.45L12 20.5l-2.4-1.1-2.4-.45-1.7 1.4-1.7-1.7 1.4-1.7-.45-2.4L2.6 13.4V11l2.15-1.1.45-2.4-1.4-1.7 1.7-1.7 1.7 1.4 2.4-.45L12 3.5Z"/></symbol>
+</svg>
+
 <header>
   <div class="row">
     <strong style="color:var(--accent2)">TierForge</strong>
     <span id="runtimeStatus" class="runtime-status checking"><i></i> Connecting</span>
     <input id="title" value="Untitled Tier List" spellcheck="false">
     <div class="sep"></div>
-    <button id="btnImport" class="primary">Import ▾</button>
-    <button id="btnExport">Export ▾</button>
-    <button id="btnBoards">Boards</button>
     <div class="spacer"></div>
     <span class="muted" id="stat"></span>
+    <div id="settingsWrap">
+      <button id="btnSettings" class="ghost icon-button" type="button" title="Display settings" aria-label="Display settings"><svg class="icon" aria-hidden="true" focusable="false"><use href="#icon-settings"></use></svg></button>
+      <div id="settingsMenu" hidden>
+        <label for="labmode">Labels</label>
+        <select id="labmode">
+          <option value="find">Ctrl+F only (hidden)</option>
+          <option value="show">Always visible</option>
+          <option value="hover">On hover</option>
+        </select>
+      </div>
+    </div>
     <button id="btnHelp" class="ghost">?</button>
   </div>
   <div class="row">
+    <button id="btnImport" class="primary">Import ▾</button>
+    <button id="btnExport">Export ▾</button>
+    <button id="btnBoards">Boards</button>
+    <div id="subboardControl" class="row" title="Alternative item placements for this board">
+      <span class="muted subboard-label">Sub-boards</span>
+      <select id="subboardSelect" aria-label="Active sub-board"></select>
+      <button id="btnAddSubboard" class="icon-button" type="button" title="Add sub-board" aria-label="Add sub-board"><svg class="icon" aria-hidden="true" focusable="false"><use href="#icon-plus"></use></svg></button>
+    </div>
+    <div class="sep"></div>
     <div id="searchbox">
       <input id="q" placeholder="Search name, tag, note…  ( / )" spellcheck="false">
       <button id="btnClearSearch" type="button" title="Clear search" aria-label="Clear search">×</button>
     </div>
     <span id="qcount" class="muted"></span>
     <button id="btnSelHits" title="Select every match">Select matches</button>
-    <div class="sep"></div>
-    <label class="row muted" style="gap:4px">Labels
-      <select id="labmode">
-        <option value="find">Ctrl+F only (hidden)</option>
-        <option value="show">Always visible</option>
-        <option value="hover">On hover</option>
-      </select>
-    </label>
     <div class="spacer"></div>
     <span class="muted" id="selinfo"></span>
   </div>

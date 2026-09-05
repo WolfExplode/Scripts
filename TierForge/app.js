@@ -2,6 +2,7 @@
 const $=(s,r=document)=>r.querySelector(s), $$=(s,r=document)=>[...r.querySelectorAll(s)];
 const uid=()=>Math.random().toString(36).slice(2,10);
 const TILE_SIZE=96;
+const icon=name=>`<svg class="icon" aria-hidden="true" focusable="false"><use href="#icon-${name}"></use></svg>`;
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
 /* TierMaker's stock row palette, indexed by the colour number in templateCode */
@@ -16,9 +17,47 @@ function blankState(){
     tiers:DEFAULT_TIERS.map(([l,c])=>({id:uid(),label:l,color:c,items:[]})),
     pool:[],items:{},opts:{labels:'find'}};
 }
-function snapshot(){ undoStack.push(JSON.stringify(S)); if(undoStack.length>40)undoStack.shift(); }
+function layoutFromState(){
+  return {tiers:S.tiers.map(t=>({id:t.id,items:[...t.items]})),pool:[...S.pool]};
+}
+function activeSubBoard(){
+  return S.subBoards?.find(b=>b.id===S.activeSubBoardId)||S.subBoards?.[0];
+}
+function storeActiveSubBoard(){
+  const sub=activeSubBoard(); if(sub)sub.layout=layoutFromState();
+}
+function applySubBoardLayout(layout){
+  const placements=new Map((layout?.tiers||[]).map(t=>[t.id,t.items||[]]));
+  const seen=new Set();
+  const valid=ids=>ids.filter(id=>S.items[id]&&!seen.has(id)&&(seen.add(id),true));
+  S.tiers.forEach(t=>{ t.items=valid(placements.get(t.id)||[]); });
+  S.pool=valid(layout?.pool||[]);
+  Object.keys(S.items).forEach(id=>{ if(!seen.has(id))S.pool.push(id); });
+}
+function ensureSubBoards(){
+  if(!Array.isArray(S.subBoards)||!S.subBoards.length){
+    S.subBoards=[{id:uid(),name:'Main',layout:layoutFromState()}];
+  }
+  S.subBoards=S.subBoards.map((sub,i)=>({
+    id:sub.id||uid(),name:String(sub.name||`Alternative ${i+1}`),layout:sub.layout||layoutFromState()
+  }));
+  if(!S.subBoards.some(sub=>sub.id===S.activeSubBoardId))S.activeSubBoardId=S.subBoards[0].id;
+}
+function prepareState(){
+  if(!S||!S.tiers)S=blankState();
+  S.opts=Object.assign({labels:'find'},S.opts||{}); delete S.opts.size;
+  ensureSubBoards(); applySubBoardLayout(activeSubBoard().layout);
+}
+function renderSubBoards(){
+  const picker=$('#subboardSelect'); if(!picker)return;
+  picker.replaceChildren(...S.subBoards.map(sub=>{
+    const option=document.createElement('option'); option.value=sub.id; option.textContent=sub.name; return option;
+  }));
+  picker.value=S.activeSubBoardId;
+}
+function snapshot(){ storeActiveSubBoard(); undoStack.push(JSON.stringify(S)); if(undoStack.length>40)undoStack.shift(); }
 function undo(){ if(!undoStack.length)return toast('Nothing to undo');
-  S=JSON.parse(undoStack.pop()); sel.clear(); render(); toast('Undone'); }
+  S=JSON.parse(undoStack.pop()); prepareState(); sel.clear(); render(); toast('Undone'); }
 
 /* list helpers -------------------------------------------------- */
 const listOf=ref=> ref==='pool' ? S.pool : (S.tiers.find(t=>t.id===ref)||{items:[]}).items;
@@ -77,6 +116,7 @@ function fillDrop(node,ids){ const f=document.createDocumentFragment();
   ids.forEach(id=>f.appendChild(itemNode(id))); node.replaceChildren(f); }
 
 function render(){
+  ensureSubBoards(); renderSubBoards();
   document.body.className='lab-'+S.opts.labels;
   $('#title').value=S.title; $('#labmode').value=S.opts.labels;
 
@@ -89,11 +129,11 @@ function render(){
         <div class="txt" contenteditable="plaintext-only" spellcheck="false">${esc(t.label)}</div>
         <div class="cnt">${t.items.length}</div>
         <div class="tools">
-          <button data-act="color" title="Colour">◧</button>
-          <button data-act="up" title="Move up">▲</button>
-          <button data-act="down" title="Move down">▼</button>
-          <button data-act="clear" title="Empty this tier">⤓</button>
-          <button data-act="del" title="Delete tier">✕</button>
+          <button class="icon-button" data-act="color" title="Change colour" aria-label="Change colour">${icon('palette')}</button>
+          <button class="icon-button" data-act="up" title="Move tier up" aria-label="Move tier up">${icon('chevron-up')}</button>
+          <button class="icon-button" data-act="down" title="Move tier down" aria-label="Move tier down">${icon('chevron-down')}</button>
+          <button class="icon-button" data-act="clear" title="Empty this tier" aria-label="Empty this tier">${icon('archive-down')}</button>
+          <button class="icon-button danger" data-act="del" title="Delete tier" aria-label="Delete tier">${icon('trash')}</button>
         </div>
       </div>
       <div class="drop" data-list="${t.id}"></div>`;
@@ -149,29 +189,126 @@ document.addEventListener('input',e=>{ if(e.target.classList.contains('txt')){
   const t=S.tiers.find(t=>t.id===tid); if(t){ t.label=e.target.textContent.trim(); persist(); } }});
 
 /* ============================ DRAG & DROP ============================ */
-let dragIds=[];
-document.addEventListener('dragstart',e=>{ const it=e.target.closest('.item'); if(!it)return;
-  const id=it.dataset.id; dragIds=sel.has(id)?[...sel]:[id];
-  if(!sel.has(id)){ sel.clear(); sel.add(id); syncSel(); }
-  e.dataTransfer.effectAllowed='move'; e.dataTransfer.setData('text/plain',id);
-  requestAnimationFrame(()=>dragIds.forEach(x=>$(`.item[data-id="${x}"]`)?.classList.add('dragging')));
-});
-document.addEventListener('dragend',()=>{ dragIds=[]; $$('.dragging').forEach(e=>e.classList.remove('dragging'));
-  $$('.drop.over').forEach(e=>e.classList.remove('over')); });
-document.addEventListener('dragover',e=>{ const d=e.target.closest('.drop'); if(!d||!dragIds.length)return;
-  e.preventDefault(); e.dataTransfer.dropEffect='move';
-  $$('.drop.over').forEach(x=>x!==d&&x.classList.remove('over')); d.classList.add('over'); });
-document.addEventListener('drop',e=>{ const d=e.target.closest('.drop'); if(!d||!dragIds.length)return;
-  e.preventDefault(); moveItems(dragIds,d.dataset.list,insertBefore(d,e.clientX,e.clientY)); dragIds=[]; });
-function insertBefore(cont,x,y){
-  for(const el of $$('.item',cont)){ if(el.classList.contains('dragging'))continue;
-    const r=el.getBoundingClientRect();
-    if(y<r.bottom && x<r.left+r.width/2) return el.dataset.id; }
-  return null;
+let dragIds=[], dragPreview=null, dropPlaceholders=[], dragBeforeId=null, dragTarget=null;
+const clearDragImage=document.createElement('canvas');
+clearDragImage.width=clearDragImage.height=1;
+const SNAP_HOLD_RATIO=.18;
+
+function beginDragPreview(item,e,count){
+  const rect=item.getBoundingClientRect(), baseWidth=item.offsetWidth||TILE_SIZE;
+  dragPreview=item.cloneNode(true);
+  dragPreview.className='item drag-preview';
+  dragPreview.setAttribute('aria-hidden','true');
+  dragPreview.removeAttribute('draggable');
+  dragPreview.removeAttribute('data-id');
+  dragPreview.style.width=rect.width+'px'; dragPreview.style.height=rect.height+'px';
+  dragPreview.style.setProperty('--drag-scale',rect.width/baseWidth);
+  dragPreview.dataset.count=count>1?String(count):'';
+  dragPreview._offsetX=Math.max(0,Math.min(rect.width,e.clientX-rect.left));
+  dragPreview._offsetY=Math.max(0,Math.min(rect.height,e.clientY-rect.top));
+  document.body.appendChild(dragPreview); moveDragPreview(e.clientX,e.clientY);
 }
+function moveDragPreview(x,y){
+  if(!dragPreview||(!x&&!y))return;
+  dragPreview.style.left=(x-dragPreview._offsetX)+'px';
+  dragPreview.style.top=(y-dragPreview._offsetY)+'px';
+}
+function clearDrag(){
+  dragIds=[]; dragBeforeId=null; dragTarget=null; dragPreview?.remove(); dragPreview=null;
+  dropPlaceholders.forEach(slot=>slot.remove()); dropPlaceholders=[];
+  document.body.classList.remove('card-dragging');
+  $$('.dragging').forEach(el=>el.classList.remove('dragging'));
+  $$('.drop.over').forEach(el=>el.classList.remove('over'));
+}
+
+/* Find a position in a wrapped flex grid. Horizontal position chooses a slot in
+   the nearest visual row; passing the final tile advances to the next row. */
+function placementAt(cont,x,y){
+  const entries=$$('.item',cont).filter(el=>!el.classList.contains('dragging'))
+    .map(el=>({el,rect:el.getBoundingClientRect()}));
+  if(!entries.length)return {beforeId:null,anchor:null,empty:true};
+  const rows=[];
+  for(const entry of entries){
+    let row=rows.at(-1);
+    if(!row||Math.abs(entry.rect.top-row.top)>Math.max(4,entry.rect.height*.25)){
+      row={top:entry.rect.top,bottom:entry.rect.bottom,items:[]}; rows.push(row);
+    }
+    row.items.push(entry); row.top=Math.min(row.top,entry.rect.top);
+    row.bottom=Math.max(row.bottom,entry.rect.bottom);
+  }
+  if(y>rows.at(-1).bottom)return {beforeId:null,anchor:entries.at(-1),empty:false};
+  let rowIndex=0, best=Infinity;
+  rows.forEach((row,i)=>{ const distance=y<row.top?row.top-y:y>row.bottom?y-row.bottom:0;
+    if(distance<best){best=distance;rowIndex=i;} });
+  const row=rows[rowIndex];
+  const before=row.items.find(entry=>x<entry.rect.left+entry.rect.width/2);
+  if(before)return {beforeId:before.el.dataset.id,anchor:before,empty:false};
+  const next=rows[rowIndex+1]?.items[0];
+  return next?{beforeId:next.el.dataset.id,anchor:next,empty:false}
+    :{beforeId:null,anchor:row.items.at(-1),empty:false};
+}
+function ensureDropPlaceholders(){
+  if(dropPlaceholders.length)return;
+  dropPlaceholders=dragIds.map(()=>{ const slot=document.createElement('div');
+    slot.className='drop-placeholder'; slot.setAttribute('aria-hidden','true'); return slot; });
+}
+function seedDropPlaceholders(item,selected){
+  ensureDropPlaceholders();
+  const source=item.closest('.drop'), sourceItems=$$('.item',source);
+  const next=sourceItems.slice(sourceItems.indexOf(item)+1)
+    .find(el=>!selected.has(el.dataset.id));
+  dragBeforeId=next?.dataset.id||null; dragTarget=source;
+  dragIds.forEach((id,index)=>{
+    const sourceItem=$$('.item').find(el=>el.dataset.id===id);
+    if(sourceItem)sourceItem.before(dropPlaceholders[index]);
+  });
+}
+function pointerInHeldSlot(cont,x,y){
+  if(dragTarget!==cont)return false;
+  return dropPlaceholders.some(slot=>{ if(slot.parentElement!==cont)return false;
+    const rect=slot.getBoundingClientRect();
+    const margin=Math.min(rect.width,rect.height)*SNAP_HOLD_RATIO;
+    return x>=rect.left-margin&&x<=rect.right+margin&&y>=rect.top-margin&&y<=rect.bottom+margin;
+  });
+}
+function placeDropPlaceholders(cont,placement){
+  ensureDropPlaceholders();
+  if(placement.empty||!placement.beforeId) cont.append(...dropPlaceholders);
+  else placement.anchor.el.before(...dropPlaceholders);
+}
+
+document.addEventListener('dragstart',e=>{ const item=e.target.closest('.item'); if(!item)return;
+  const id=item.dataset.id;
+  if(!sel.has(id)){sel.clear();sel.add(id);syncSel();}
+  const selected=new Set(sel);
+  dragIds=flatOrder().filter(itemId=>selected.has(itemId));
+  e.dataTransfer.effectAllowed='move'; e.dataTransfer.setData('text/plain',id);
+  e.dataTransfer.setDragImage(clearDragImage,0,0);
+  beginDragPreview(item,e,dragIds.length); document.body.classList.add('card-dragging');
+  requestAnimationFrame(()=>{
+    seedDropPlaceholders(item,selected);
+    dragIds.forEach(itemId=>$(`.item[data-id="${itemId}"]`)?.classList.add('dragging'));
+  });
+});
+document.addEventListener('drag',e=>moveDragPreview(e.clientX,e.clientY));
+document.addEventListener('dragend',clearDrag);
+document.addEventListener('dragover',e=>{ const d=e.target.closest('.drop'); if(!d||!dragIds.length)return;
+  e.preventDefault(); e.dataTransfer.dropEffect='move'; moveDragPreview(e.clientX,e.clientY);
+  $$('.drop.over').forEach(el=>el!==d&&el.classList.remove('over')); d.classList.add('over');
+  if(pointerInHeldSlot(d,e.clientX,e.clientY))return;
+  const placement=placementAt(d,e.clientX,e.clientY);
+  dragBeforeId=placement.beforeId; dragTarget=d; placeDropPlaceholders(d,placement);
+});
+document.addEventListener('drop',e=>{ const d=e.target.closest('.drop'); if(!d||!dragIds.length)return;
+  e.preventDefault();
+  const ids=[...dragIds], destination=d.dataset.list;
+  const beforeId=dragTarget===d?dragBeforeId:placementAt(d,e.clientX,e.clientY).beforeId;
+  clearDrag(); moveItems(ids,destination,beforeId);
+});
 
 /* ============================ KEYBOARD ============================ */
 document.addEventListener('keydown',e=>{
+  if(e.key==='Escape'&&!$('#settingsMenu').hidden){ $('#settingsMenu').hidden=true; return; }
   const typing=/^(INPUT|TEXTAREA)$/.test(e.target.tagName)||e.target.isContentEditable;
   if(e.key==='/'&&!typing){ e.preventDefault(); $('#q').focus(); $('#q').select(); return; }
   if(e.key==='Escape'){ if(typing&&e.target.id==='q'){ $('#q').value=''; applyFilter(); e.target.blur(); }
@@ -250,6 +387,21 @@ $('#title').oninput=e=>{ S.title=e.target.value; persist(); };
 $('#q').oninput=applyFilter;
 $('#btnClearSearch').onclick=()=>{ $('#q').value=''; applyFilter(); $('#q').focus(); };
 $('#labmode').onchange=e=>{ S.opts.labels=e.target.value; document.body.className='lab-'+e.target.value; persist(); };
+$('#subboardSelect').onchange=e=>{
+  const next=S.subBoards.find(sub=>sub.id===e.target.value); if(!next)return;
+  storeActiveSubBoard(); S.activeSubBoardId=next.id; applySubBoardLayout(next.layout);
+  sel.clear(); lastClicked=null; persist(); render(); toast(`Switched to "${next.name}"`);
+};
+$('#btnAddSubboard').onclick=()=>{
+  const suggested=`Alternative ${S.subBoards.length}`;
+  const name=window.prompt('Name this sub-board:',suggested);
+  if(name===null)return;
+  const clean=name.trim()||suggested;
+  snapshot(); storeActiveSubBoard();
+  const sub={id:uid(),name:clean,layout:layoutFromState()};
+  S.subBoards.push(sub); S.activeSubBoardId=sub.id;
+  sel.clear(); lastClicked=null; persist(); render(); toast(`Created sub-board "${clean}"`);
+};
 function addTier(){ snapshot();
   S.tiers.push({id:uid(),label:'New',color:TM_COLORS[S.tiers.length%10],items:[]}); persist(); render(); }
 $('#btnSelHits').onclick=selectHits;
@@ -261,6 +413,8 @@ $('#btnSortPool').onclick=()=>{ snapshot();
 $('#btnAddImgs').onclick=()=>$('#fileinput').click();
 $('#fileinput').onchange=e=>addFiles([...e.target.files]);
 $('#btnHelp').onclick=()=>dlgHelp.showModal();
+$('#btnSettings').onclick=e=>{ e.stopPropagation(); $('#settingsMenu').hidden=!$('#settingsMenu').hidden; };
+document.addEventListener('click',e=>{ if(!e.target.closest('#settingsWrap'))$('#settingsMenu').hidden=true; });
 $('#btnImport').onclick=async()=>{ dlgImport.showModal(); refreshHelperState(); renderGameSources(); };
 async function refreshHelperState(){
   const el=$('#helperstate'); el.textContent='Checking for the local runtime…';
@@ -320,6 +474,8 @@ async function addFiles(files){ if(!files.length)return; snapshot();
 const AUTOSAVE='_autosave';
 let saveTimer=null, warnedNoHelper=false;
 function persist(){
+  ensureSubBoards();
+  storeActiveSubBoard();
   if(!helperBase){ warnNoHelper(); return; }
   clearTimeout(saveTimer);
   saveTimer=setTimeout(()=>{
@@ -336,6 +492,8 @@ function quickSave(){ const name=S.title||'Board';
   saveBoard(name).then(ok=>toast(ok?'Saved board "'+name+'"':'Not saved—no local runtime')); }
 async function saveBoard(name){
   if(!helperBase){ warnNoHelper(); return false; }
+  ensureSubBoards();
+  storeActiveSubBoard();
   try{ const r=await fetch(helperBase+'/boards/'+encodeURIComponent(name),
     {method:'PUT',body:JSON.stringify(S)}); return r.ok; }
   catch(e){ return false; }
@@ -351,13 +509,29 @@ async function renderBoards(){
   wrap.innerHTML=list.length?list.map(b=>`<div class="row" style="padding:4px 0;border-bottom:1px solid var(--line)">
       <span data-board-label style="flex:1">${esc(b.name)}</span>
       <small>${new Date(b.mtime).toLocaleString()}</small>
-      <button data-load="${esc(b.name)}">Load</button><button class="danger" data-drop="${esc(b.name)}" title="Click once to arm deletion" aria-label="Delete board">✕</button></div>`).join('')
+      <button data-load="${esc(b.name)}">Load</button>
+      <button data-overwrite="${esc(b.name)}" title="Click once to arm overwrite">Overwrite</button>
+      <button class="danger" data-drop="${esc(b.name)}" title="Click once to arm deletion" aria-label="Delete board">✕</button></div>`).join('')
     :'<div class="muted">No saved boards yet.</div>';
   $$('[data-board-label]',wrap).forEach(x=>x.ondblclick=()=>startInlineBoardRename(x));
   $$('button[data-load]',wrap).forEach(x=>x.onclick=async()=>{
     const r=await fetch(helperBase+'/boards/'+encodeURIComponent(x.dataset.load));
     if(!r.ok)return toast('Could not load that board');
-    snapshot(); S=JSON.parse(await r.text()); sel.clear(); persist(); render(); dlgBoards.close(); });
+    snapshot(); S=JSON.parse(await r.text()); prepareState(); sel.clear(); persist(); render(); dlgBoards.close(); });
+  $$('button[data-overwrite]',wrap).forEach(x=>x.onclick=async()=>{
+    if(x.dataset.confirm!=='1'){
+      x.dataset.confirm='1';
+      x.textContent='Confirm';
+      x.title='Click again to overwrite this board';
+      return;
+    }
+    x.disabled=true;
+    const name=x.dataset.overwrite;
+    const r=await fetch(helperBase+'/boards/'+encodeURIComponent(name),
+      {method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify((storeActiveSubBoard(),S))});
+    if(!r.ok){ x.disabled=false; delete x.dataset.confirm; x.textContent='Overwrite'; return toast('Could not overwrite that board'); }
+    renderBoards(); toast('Overwrote board "'+name+'"');
+  });
   $$('button[data-drop]',wrap).forEach(x=>x.onclick=async()=>{
     if(x.dataset.confirm!=='1'){
       x.dataset.confirm='1';
@@ -911,13 +1085,22 @@ function normalize(o){
     st.items[id]={id,name:it.name||nameFromUrl(it.img||''),tags:it.tags||[],
       notes:it.notes||'',img:it.img||it.src||'',src:it.src||'',tmkey:it.tmkey||it.key||''};
     map[it.id||'']=id; if(it.key)map[it.key]=id; if(it.tmkey)map[it.tmkey]=id; });
-  st.tiers=(o.tiers||[]).map((t,i)=>({id:uid(),label:t.label??t.name??String(i),
-    color:t.color||TM_COLORS[i%10],
-    items:(t.items||t.ids||[]).map(x=>map[x]||(st.items[x]?x:null)).filter(Boolean)}));
+  const tierMap={};
+  st.tiers=(o.tiers||[]).map((t,i)=>{ const id=uid(); if(t.id)tierMap[t.id]=id;
+    return {id,label:t.label??t.name??String(i),color:t.color||TM_COLORS[i%10],
+      items:(t.items||t.ids||[]).map(x=>map[x]||(st.items[x]?x:null)).filter(Boolean)};
+  });
   if(!st.tiers.length)st.tiers=blankState().tiers;
   const placed=new Set(st.tiers.flatMap(t=>t.items));
   st.pool=(o.pool||[]).map(x=>map[x]||x).filter(x=>st.items[x]&&!placed.has(x));
   Object.keys(st.items).forEach(id=>{ if(!placed.has(id)&&!st.pool.includes(id))st.pool.push(id); });
+  if(Array.isArray(o.subBoards)&&o.subBoards.length){
+    const remapIds=ids=>(ids||[]).map(id=>map[id]||(st.items[id]?id:null)).filter(Boolean);
+    st.subBoards=o.subBoards.map((sub,i)=>({id:sub.id||uid(),name:sub.name||`Alternative ${i+1}`,
+      layout:{tiers:(sub.layout?.tiers||[]).map(t=>({id:tierMap[t.id]||t.id,items:remapIds(t.items)})),
+        pool:remapIds(sub.layout?.pool)}}));
+    st.activeSubBoardId=o.activeSubBoardId;
+  }
   return st;
 }
 
@@ -1082,8 +1265,7 @@ function wrapText(ctx,text,x,y,maxw,lh){
   }
   if(!S||!S.tiers)S=blankState();
   const hadSize=Object.prototype.hasOwnProperty.call(S.opts||{},'size');
-  S.opts=Object.assign({labels:'find'},S.opts||{});
-  delete S.opts.size;
+  prepareState();
   if(hadSize)persist();
   render();
   if(!helperBase) warnNoHelper();
