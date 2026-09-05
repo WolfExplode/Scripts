@@ -197,6 +197,7 @@ a{color:var(--accent)}
       <div id="helperstate" class="note">Checking for the local helper…</div>
       <input id="tmurl" placeholder="https://tiermaker.com/list/video-games/… or a slaythespire.wiki.gg page" spellcheck="false">
       <label class="row" style="gap:6px"><input type="checkbox" id="embedimgs"> Download &amp; embed images as data URLs (offline-safe, enables PNG export — slower)</label>
+      <label class="row" style="gap:6px"><input type="checkbox" id="localimgs"> Download images to local files (refresh manually when the wiki updates)</label>
       <label class="row" style="gap:6px"><input type="checkbox" id="mergeimp"> Merge into current board instead of replacing</label>
       <div class="row"><button id="btnFetch" class="primary">Fetch &amp; import</button>
         <span class="muted" style="font-size:12px">…or use the bookmarklet on the Grab tab — that one can't be blocked.</span></div>
@@ -708,8 +709,9 @@ async function findHelper(){
  * dialog's own #log panel) — a plain TierMaker template finishes in a couple
  * of polls, but ~600 embedded wiki images take tens of seconds, and this is
  * what lets you watch it go image by image instead of staring at a spinner. */
-async function importViaHelper(base,url,embed,onLine=log){
-  const startRes=await fetch(base+'/import/start?'+new URLSearchParams({url,...(embed?{embed:'1'}:{})}));
+async function importViaHelper(base,url,embed,onLine=log,local=false){
+  const startRes=await fetch(base+'/import/start?'+new URLSearchParams({url,
+    ...(embed?{embed:'1'}:{}),...(local&&!embed?{images:'1'}:{})}));
   const start=await startRes.json().catch(()=>({}));
   if(!startRes.ok||start.error) throw new Error(start.error||('HTTP '+startRes.status));
   let since=0;
@@ -903,11 +905,12 @@ function renderGameSources(){
 
 function quickWikiImport(src){
   $('#tmurl').value=src.wiki;
-  /* wiki CDNs tend to block a page loading hundreds of hotlinked images at once,
-     so embed them (fetched one at a time by the helper) instead of linking out */
-  $('#embedimgs').checked=true;
+  /* Prefer a refreshable local cache for the large wiki card set. */
+  $('#localimgs').checked=true; $('#embedimgs').checked=false;
   $('#btnFetch').click();
 }
+$('#embedimgs').onchange=()=>{ if($('#embedimgs').checked) $('#localimgs').checked=false; };
+$('#localimgs').onchange=()=>{ if($('#localimgs').checked) $('#embedimgs').checked=false; };
 
 /** Swap the current board's item images for the wiki's, matching by name with
  * punctuation/spacing stripped (TierMaker's "Ashenstrike" == wiki's "Ashen
@@ -919,7 +922,8 @@ async function relinkFromWiki(src){
   $('#log').textContent='';
   toast('Fetching '+src.name+' data from the wiki…');
   let pack;
-  try{ pack=await importViaHelper(helperBase,src.wiki,true); }
+  const local=$('#localimgs')?.checked;
+  try{ pack=await importViaHelper(helperBase,src.wiki,!local,log,local); }
   catch(e){ return toast('Could not fetch the wiki: '+e.message); }
   const byName={};
   (Array.isArray(pack.items)?pack.items:Object.values(pack.items)).forEach(it=>{ byName[normName(it.name)]=it; });
@@ -945,7 +949,7 @@ $('#btnFetch').onclick=async()=>{
       if(!helperBase) throw new Error('This needs the local helper — run TierForge.cmd from the '
         +'TierForge folder, then reload this page. The wiki blocks plain browser fetches.');
       log('Using local helper at '+helperBase+' …');
-      const pack=await importViaHelper(helperBase,url,$('#embedimgs').checked);
+      const pack=await importViaHelper(helperBase,url,$('#embedimgs').checked,log,$('#localimgs').checked);
       if($('#mergeimp').checked){ snapshot(); const added=mergeItemsIntoPool(pack);
         log(`Merged ${added} new card(s) into the pool (${pack.items.length-added} already present).`); }
       else { S=normalize(pack); log(`Imported ${pack.items.length} cards.`); }
@@ -968,7 +972,7 @@ $('#btnFetch').onclick=async()=>{
     if(helperBase===null) helperBase=await findHelper();
     if(helperBase){
       log('Using local helper at '+helperBase+' …');
-      const pack=await importViaHelper(helperBase,url,$('#embedimgs').checked);
+      const pack=await importViaHelper(helperBase,url,$('#embedimgs').checked,log,$('#localimgs').checked);
       S=normalize(pack); sel.clear(); persist(); render();
       log(`Imported ${pack.items.length} items into ${pack.tiers.length} tiers.`);
       return toast('Imported '+pack.items.length+' items');

@@ -330,7 +330,9 @@ def stswiki_title(page: str) -> str:
     return re.sub(r"\s*[|–-]\s*Slay the Spire 2.*$", "", t, flags=re.I).strip()
 
 
-def build_stswiki_pack(url: str, verbose: bool = True, embed: bool = False) -> dict:
+def build_stswiki_pack(url: str, verbose: bool = True, embed: bool = False,
+                       images_dir: str | None = None,
+                       image_link_prefix: str | None = None) -> dict:
     """A ready-to-load TierForge board straight from the wiki's Cards List page."""
     if verbose:
         _log("Reading wiki page...")
@@ -344,6 +346,8 @@ def build_stswiki_pack(url: str, verbose: bool = True, embed: bool = False) -> d
         c["img"] = c["src"]
     if embed:
         grab_images(cards, "embed", "")
+    elif images_dir:
+        grab_images(cards, "files", images_dir, link_prefix=image_link_prefix)
     title = stswiki_title(page) or "Slay the Spire 2 Cards"
     tiers = [{"label": l, "color": c, "items": []} for l, c in zip("SABCDF", TM_COLORS)]
     items = [{"id": c["key"], "key": c["key"], "name": c["name"], "tags": c["tags"],
@@ -353,7 +357,8 @@ def build_stswiki_pack(url: str, verbose: bool = True, embed: bool = False) -> d
 
 
 # ------------------------------------------------------------------------ images
-def grab_images(items, mode: str, outdir: str, verbose: bool = True):
+def grab_images(items, mode: str, outdir: str, verbose: bool = True,
+                link_prefix: str | None = None):
     """mode: 'link' (leave URLs), 'embed' (base64 into the json), 'files' (save next to it)"""
     if mode == "link":
         return
@@ -376,7 +381,8 @@ def grab_images(items, mode: str, outdir: str, verbose: bool = True):
             fn = re.sub(r"[^A-Za-z0-9._-]", "_", f"{it['key']}_{it['name']}")[:60] + ext
             with open(os.path.join(outdir, fn), "wb") as fh:
                 fh.write(blob)
-            it["img"] = os.path.basename(outdir) + "/" + fn
+            it["img"] = (link_prefix.rstrip("/") + "/" + fn
+                         if link_prefix else os.path.basename(outdir) + "/" + fn)
 
 
 # ------------------------------------------------------------------------- build
@@ -438,13 +444,21 @@ def finish_pack(raw: dict, tags: list[str] | None = None) -> dict:
             "pool": [c["key"] for c in chars if c["key"] not in placed], "items": items}
 
 
-def _do_import(url: str, embed: bool, tags: list[str]) -> dict:
+def _do_import(url: str, embed: bool, tags: list[str], images: bool = False) -> dict:
     """The one place that decides which scraper a URL needs. Shared by the
     plain synchronous /import and the backgrounded /import/start job."""
     if "slaythespire.wiki.gg" in url.lower():
+        if images and not embed:
+            root = os.path.dirname(os.path.abspath(__file__))
+            return build_stswiki_pack(url, images_dir=os.path.join(root, "Images", "sts2"),
+                                      image_link_prefix="Images/sts2")
         return build_stswiki_pack(url, embed=embed)
     raw = build_pack(url)
-    if embed:
+    if images and not embed:
+        root = os.path.dirname(os.path.abspath(__file__))
+        grab_images(raw["chars"], "files", os.path.join(root, "Images", "tiermaker"),
+                    link_prefix="Images/tiermaker")
+    elif embed:
         grab_images(raw["chars"], "embed", "")
     return finish_pack(raw, tags)
 
@@ -468,10 +482,10 @@ def _job_append(job_id: str, msg: str) -> None:
             job["lines"].append(msg)
 
 
-def _run_import_job(job_id: str, url: str, embed: bool, tags: list[str]) -> None:
+def _run_import_job(job_id: str, url: str, embed: bool, tags: list[str], images: bool) -> None:
     _tls.cb = lambda m: _job_append(job_id, m)
     try:
-        pack = _do_import(url, embed, tags)
+        pack = _do_import(url, embed, tags, images)
         with _JOBS_LOCK:
             _JOBS[job_id]["result"] = pack
             _JOBS[job_id]["done"] = True
@@ -487,7 +501,7 @@ def _run_import_job(job_id: str, url: str, embed: bool, tags: list[str]) -> None
 HELPER_HELP = """TierForge helper is running.
 
   open        http://127.0.0.1:{port}/tierforge.html
-  import API  /import?url=<tiermaker or slaythespire.wiki.gg url>[&embed=1][&tags=a,b]
+  import API  /import?url=<tiermaker or slaythespire.wiki.gg url>[&embed=1][&images=1][&tags=a,b]
   import job  /import/start?url=...  ->  {{"job":id}}   /import/poll?job=id&since=n
   boards API  /boards  (list)   /boards/<name>  (GET/PUT/DELETE, on disk in Saved/)
 
@@ -561,8 +575,9 @@ def serve(port: int, open_browser: bool = True) -> int:
             try:
                 _log(f"Import: {url}")
                 embed = (qs.get("embed") or [""])[0] in ("1", "true", "yes")
+                images = (qs.get("images") or [""])[0] in ("1", "true", "yes")
                 tags = [t.strip() for t in (qs.get("tags") or [""])[0].split(",") if t.strip()]
-                pack = _do_import(url, embed, tags)
+                pack = _do_import(url, embed, tags, images)
                 _log(f"  -> {len(pack['items'])} items, {len(pack['tiers'])} tiers")
                 self._send(200, json.dumps(pack, ensure_ascii=False).encode("utf-8"))
             except Exception as e:  # noqa: BLE001
@@ -575,12 +590,13 @@ def serve(port: int, open_browser: bool = True) -> int:
             if not url:
                 return self._err(400, "missing url")
             embed = (qs.get("embed") or [""])[0] in ("1", "true", "yes")
+            images = (qs.get("images") or [""])[0] in ("1", "true", "yes")
             tags = [t.strip() for t in (qs.get("tags") or [""])[0].split(",") if t.strip()]
             job_id = uuid.uuid4().hex[:12]
             with _JOBS_LOCK:
                 _JOBS[job_id] = {"lines": [f"Import: {url}"], "done": False,
                                   "result": None, "error": None}
-            threading.Thread(target=_run_import_job, args=(job_id, url, embed, tags),
+            threading.Thread(target=_run_import_job, args=(job_id, url, embed, tags, images),
                               daemon=True).start()
             self._send(200, json.dumps({"job": job_id}).encode("utf-8"))
 

@@ -44,6 +44,10 @@ Verified against the reference list (`ironclad-cards-slay-the-spire-ii-19230513`
 Tick **Download & embed images** if you want the board to survive TierMaker going away (and to
 make PNG export bulletproof).
 
+Tick **Download images to local files** to keep image files in `TierForge/Images/` and use them
+while building tier lists. Existing filenames are overwritten when you run the import again, so
+refreshing a wiki source is a manual action. The board keeps the original wiki URL in `src`.
+
 ### 3. Or grab every Slay the Spire 2 card in one click
 
 **Import → Slay the Spire 2: all cards** reads
@@ -52,10 +56,10 @@ all ~600 cards into the pool — name, character, rarity, type and keywords all 
 tags, and the card text becomes its note. Tick **Merge into current board** to add them to a board
 you're already building instead of replacing it.
 
-The wiki's image CDN blocks a page loading ~600 hotlinked images at once, so this import always
-embeds the art as data URLs (fetched one at a time by the helper) rather than linking to wiki.gg —
-which also means the board still works if the wiki is ever unreachable. That's ~600 sequential
-fetches, so it takes tens of seconds; the Import dialog's log panel streams each one
+The wiki's image CDN blocks a page loading ~600 hotlinked images at once, so the helper fetches
+the art one at a time. Choose local files for a refreshable cache, or embed the art as data URLs
+for a self-contained board. That's ~600 sequential fetches, so it takes tens of seconds; the
+Import dialog's log panel streams each one
 (`image 42/595 Anger`) as it happens rather than sitting on a spinner, and reports anything that
 failed instead of silently dropping it.
 
