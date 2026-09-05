@@ -2,7 +2,3 @@
 __pycache__/
 
 bpm_animation_sequence/
-
-# TierForge local runtime data
-TierForge/Images/
-TierForge/.playwright-cli/
