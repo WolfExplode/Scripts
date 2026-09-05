@@ -48,12 +48,29 @@ function prepareState(){
   S.opts=Object.assign({labels:'find'},S.opts||{}); delete S.opts.size;
   ensureSubBoards(); applySubBoardLayout(activeSubBoard().layout);
 }
+function applyTitleWidth(){
+  const width=Number(S.opts?.titleWidth);
+  if(Number.isFinite(width)&&width>=220)document.documentElement.style.setProperty('--title-width',`${width}px`);
+  else document.documentElement.style.removeProperty('--title-width');
+}
 function renderSubBoards(){
-  const picker=$('#subboardSelect'); if(!picker)return;
-  picker.replaceChildren(...S.subBoards.map(sub=>{
-    const option=document.createElement('option'); option.value=sub.id; option.textContent=sub.name; return option;
+  const tabs=$('#subboardTabs'); if(!tabs)return;
+  tabs.replaceChildren(...S.subBoards.map(sub=>{
+    const tab=document.createElement('div');
+    tab.className='subboard-tab'+(sub.id===S.activeSubBoardId?' active':'');
+    const name=document.createElement('button');
+    name.className='subboard-name'; name.dataset.subboard=sub.id; name.setAttribute('role','tab');
+    name.setAttribute('aria-selected',String(sub.id===S.activeSubBoardId));
+    name.title='Click to switch · Double-click to rename'; name.textContent=sub.name;
+    const remove=document.createElement('button');
+    remove.className='subboard-delete'; remove.dataset.deleteSubboard=sub.id;
+    remove.title='Delete sub-board'; remove.setAttribute('aria-label',`Delete ${sub.name}`); remove.textContent='×';
+    tab.append(name,remove);
+    return tab;
+  }),Object.assign(document.createElement('button'),{
+    className:'icon-button subboard-add',type:'button',title:'Add sub-board',ariaLabel:'Add sub-board',
+    innerHTML:icon('plus')
   }));
-  picker.value=S.activeSubBoardId;
 }
 function snapshot(){ storeActiveSubBoard(); undoStack.push(JSON.stringify(S)); if(undoStack.length>40)undoStack.shift(); }
 function undo(){ if(!undoStack.length)return toast('Nothing to undo');
@@ -118,6 +135,7 @@ function fillDrop(node,ids){ const f=document.createDocumentFragment();
 function render(){
   ensureSubBoards(); renderSubBoards();
   document.body.className='lab-'+S.opts.labels;
+  applyTitleWidth();
   $('#title').value=S.title; $('#labmode').value=S.opts.labels;
 
   const board=$('#board'); board.replaceChildren();
@@ -171,7 +189,9 @@ document.addEventListener('click',e=>{
   if(!e.target.closest('#insp')&&!e.target.closest('header')&&!e.target.closest('dialog')){
     if(e.target.closest('main')&&!e.target.closest('.tlabel')){ sel.clear(); syncSel(); closeInsp(); } }
 });
-document.addEventListener('dblclick',e=>{ const it=e.target.closest('.item'); if(it)openInsp(it.dataset.id); });
+document.addEventListener('dblclick',e=>{ const tab=e.target.closest('[data-subboard]');
+  if(tab){ startInlineSubBoardRename(tab); return; }
+  const it=e.target.closest('.item'); if(it)openInsp(it.dataset.id); });
 
 function tierAction(tid,act){
   const i=S.tiers.findIndex(t=>t.id===tid), t=S.tiers[i]; if(!t)return; snapshot();
@@ -384,27 +404,77 @@ function openInsp(id){
 })();
 /* ============================ TOOLBAR ============================ */
 $('#title').oninput=e=>{ S.title=e.target.value; persist(); };
+(()=>{
+  const divider=$('#titleDivider'); let startX=0,startWidth=0,resizing=false;
+  const minWidth=220;
+  divider.addEventListener('pointerdown',e=>{
+    if(!S)return; resizing=true; startX=e.clientX; startWidth=$('#title').getBoundingClientRect().width;
+    divider.setPointerCapture(e.pointerId); document.body.classList.add('resizing-title'); e.preventDefault();
+  });
+  divider.addEventListener('pointermove',e=>{
+    if(!resizing)return;
+    const maxWidth=Math.max(minWidth,window.innerWidth-680);
+    const width=Math.round(Math.max(minWidth,Math.min(maxWidth,startWidth+e.clientX-startX)));
+    document.documentElement.style.setProperty('--title-width',`${width}px`);
+  });
+  const finish=e=>{
+    if(!resizing)return; resizing=false; document.body.classList.remove('resizing-title');
+    const width=Math.round($('#title').getBoundingClientRect().width);
+    S.opts.titleWidth=width; persist();
+    if(divider.hasPointerCapture(e.pointerId))divider.releasePointerCapture(e.pointerId);
+  };
+  divider.addEventListener('pointerup',finish); divider.addEventListener('pointercancel',finish);
+})();
 $('#q').oninput=applyFilter;
+$('#q').onkeydown=e=>{ if(e.key==='Enter'){ e.preventDefault(); selectHits(); } };
 $('#btnClearSearch').onclick=()=>{ $('#q').value=''; applyFilter(); $('#q').focus(); };
 $('#labmode').onchange=e=>{ S.opts.labels=e.target.value; document.body.className='lab-'+e.target.value; persist(); };
-$('#subboardSelect').onchange=e=>{
-  const next=S.subBoards.find(sub=>sub.id===e.target.value); if(!next)return;
+function switchSubBoard(id){
+  const next=S.subBoards.find(sub=>sub.id===id); if(!next||next.id===S.activeSubBoardId)return;
   storeActiveSubBoard(); S.activeSubBoardId=next.id; applySubBoardLayout(next.layout);
   sel.clear(); lastClicked=null; persist(); render(); toast(`Switched to "${next.name}"`);
-};
-$('#btnAddSubboard').onclick=()=>{
-  const suggested=`Alternative ${S.subBoards.length}`;
-  const name=window.prompt('Name this sub-board:',suggested);
-  if(name===null)return;
-  const clean=name.trim()||suggested;
+}
+function addSubBoard(){
+  const clean=`Alternative ${S.subBoards.length}`;
   snapshot(); storeActiveSubBoard();
   const sub={id:uid(),name:clean,layout:layoutFromState()};
   S.subBoards.push(sub); S.activeSubBoardId=sub.id;
   sel.clear(); lastClicked=null; persist(); render(); toast(`Created sub-board "${clean}"`);
+}
+function startInlineSubBoardRename(tab){
+  const sub=S.subBoards.find(item=>item.id===tab.dataset.subboard); if(!sub)return;
+  const input=document.createElement('input'); input.value=sub.name; input.setAttribute('aria-label','Sub-board name');
+  tab.replaceChildren(input); input.focus(); input.select();
+  let done=false;
+  const finish=save=>{ if(done)return; done=true;
+    const name=input.value.trim();
+    if(save&&name&&name!==sub.name){ snapshot(); sub.name=name; persist(); toast(`Renamed sub-board to "${name}"`); }
+    render();
+  };
+  input.onkeydown=e=>{ if(e.key==='Enter'){e.preventDefault();finish(true);}
+    else if(e.key==='Escape'){e.preventDefault();finish(false);} };
+  input.onblur=()=>finish(true);
+}
+$('#subboardTabs').onclick=e=>{
+  if(e.target.closest('.subboard-add')){ addSubBoard(); return; }
+  const remove=e.target.closest('[data-delete-subboard]');
+  if(remove){
+    const id=remove.dataset.deleteSubboard;
+    if(S.subBoards.length===1){ toast('A board needs at least one sub-board'); return; }
+    if(remove.dataset.confirm!=='1'){
+      remove.dataset.confirm='1'; remove.innerHTML=icon('trash'); remove.title='Click again to delete';
+      remove.setAttribute('aria-label','Confirm delete sub-board'); return;
+    }
+    snapshot(); storeActiveSubBoard();
+    const deletingActive=id===S.activeSubBoardId;
+    S.subBoards=S.subBoards.filter(sub=>sub.id!==id);
+    if(deletingActive){ S.activeSubBoardId=S.subBoards[0].id; applySubBoardLayout(S.subBoards[0].layout); }
+    persist(); render(); toast('Deleted sub-board'); return;
+  }
+  const tab=e.target.closest('[data-subboard]'); if(tab) switchSubBoard(tab.dataset.subboard);
 };
 function addTier(){ snapshot();
   S.tiers.push({id:uid(),label:'New',color:TM_COLORS[S.tiers.length%10],items:[]}); persist(); render(); }
-$('#btnSelHits').onclick=selectHits;
 function selectHits(){ const terms=parseQuery($('#q').value.trim());
   setSel(Object.values(S.items).filter(it=>matches(it,terms)).map(i=>i.id));
   toast(`${sel.size} selected`); }

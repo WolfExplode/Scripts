@@ -26,8 +26,13 @@ small,.muted{color:var(--dim)}
 header{display:flex;flex-direction:column;gap:6px;padding:8px 10px;background:var(--panel);
   border-bottom:1px solid var(--line);flex:none}
 #title{background:transparent;border:none;font-size:17px;font-weight:600;padding:2px 4px;min-width:220px;
-  flex:1;min-width:0}
+  flex:0 0 var(--title-width,820px);min-width:220px}
 #title:hover{background:var(--panel2)}
+.title-divider{position:relative;align-self:stretch;flex:none;width:12px;margin:0 -2px;cursor:col-resize;
+  touch-action:none}
+.title-divider::after{content:"";position:absolute;top:5px;bottom:5px;left:50%;width:1px;background:var(--line)}
+.title-divider:hover::after,.resizing-title .title-divider::after{width:2px;background:var(--accent)}
+.resizing-title,.resizing-title *{cursor:col-resize!important;user-select:none!important}
 #searchbox{position:relative;width:352px}
 #q{width:100%;padding-right:32px}
 #btnClearSearch{position:absolute;right:4px;top:4px;width:26px;height:26px;padding:0;
@@ -35,9 +40,20 @@ header{display:flex;flex-direction:column;gap:6px;padding:8px 10px;background:va
 #btnClearSearch:hover{background:var(--line);color:var(--fg)}
 #btnClearSearch[hidden]{display:none}
 #qcount{min-width:70px;font-variant-numeric:tabular-nums}
-#subboardControl{gap:5px;min-width:0}
-.subboard-label{font-size:12px;white-space:nowrap}
-#subboardSelect{width:132px;padding:5px 26px 5px 8px;overflow:hidden;text-overflow:ellipsis}
+#subboardTabs{display:flex;align-items:center;gap:8px;flex:1 1 520px;min-width:0;overflow-x:auto;
+  scrollbar-width:thin;padding:1px 0}
+.subboard-tab{width:210px;min-width:150px;height:32px;display:flex;align-items:center;gap:3px;
+  padding:2px 3px 2px 10px;overflow:hidden;background:transparent;border:1px solid var(--line);border-radius:6px}
+.subboard-tab.active{background:#1d304d;border-color:var(--accent);box-shadow:inset 0 0 0 1px rgba(110,168,255,.18)}
+.subboard-tab input{width:100%;min-width:0;border:0;background:transparent;padding:0;outline:none}
+.subboard-name{min-width:0;flex:1;padding:2px 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  text-align:left;background:transparent;border:0}
+.subboard-name:hover{background:transparent}
+.subboard-delete{display:grid;place-items:center;flex:none;width:20px;height:20px;padding:0;border:0;
+  background:transparent;color:var(--dim);font-size:17px;line-height:1}
+.subboard-delete:hover,.subboard-delete[data-confirm="1"]{background:transparent;color:var(--danger)}
+.subboard-delete .icon{width:14px;height:14px}
+.subboard-add{flex:none;color:var(--accent);border-style:dashed}
 button.icon-button{display:grid;place-items:center;width:30px;height:30px;padding:0}
 button.icon-button .icon{width:16px;height:16px}
 #settingsWrap{position:relative}

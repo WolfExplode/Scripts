@@ -27,7 +27,8 @@
     <strong style="color:var(--accent2)">TierForge</strong>
     <span id="runtimeStatus" class="runtime-status checking"><i></i> Connecting</span>
     <input id="title" value="Untitled Tier List" spellcheck="false">
-    <div class="sep"></div>
+    <div id="titleDivider" class="title-divider" role="separator" aria-orientation="vertical" aria-label="Resize board title area"></div>
+    <div id="subboardTabs" role="tablist" aria-label="Sub-boards"></div>
     <div class="spacer"></div>
     <span class="muted" id="stat"></span>
     <div id="settingsWrap">
@@ -47,18 +48,12 @@
     <button id="btnImport" class="primary">Import ▾</button>
     <button id="btnExport">Export ▾</button>
     <button id="btnBoards">Boards</button>
-    <div id="subboardControl" class="row" title="Alternative item placements for this board">
-      <span class="muted subboard-label">Sub-boards</span>
-      <select id="subboardSelect" aria-label="Active sub-board"></select>
-      <button id="btnAddSubboard" class="icon-button" type="button" title="Add sub-board" aria-label="Add sub-board"><svg class="icon" aria-hidden="true" focusable="false"><use href="#icon-plus"></use></svg></button>
-    </div>
     <div class="sep"></div>
     <div id="searchbox">
       <input id="q" placeholder="Search name, tag, note…  ( / )" spellcheck="false">
       <button id="btnClearSearch" type="button" title="Clear search" aria-label="Clear search">×</button>
     </div>
     <span id="qcount" class="muted"></span>
-    <button id="btnSelHits" title="Select every match">Select matches</button>
     <div class="spacer"></div>
     <span class="muted" id="selinfo"></span>
   </div>
@@ -192,12 +187,8 @@
     <p><strong>Search syntax.</strong> Space-separated terms are ANDed. <code>tag:starter</code>,
       <code>tier:A</code>, <code>note:vuln</code>, <code>-word</code> to exclude, <code>"two words"</code>
       for a phrase.</p>
-    <p><strong>Moving items.</strong> Drag one tile, or click tiles to build a selection
-      (<kbd>Shift</kbd>+click for a range) and drag any of them to move the whole set. With a
-      selection active, press <kbd>1</kbd>…<kbd>9</kbd> to fling it into that tier, <kbd>0</kbd> to
-      send it back to the pool.</p>
-    <p><strong>Keys.</strong> <kbd>/</kbd> search · <kbd>Esc</kbd> clear · <kbd>Ctrl</kbd>+<kbd>A</kbd>
-      select matches · <kbd>Del</kbd> delete selection · <kbd>Ctrl</kbd>+<kbd>S</kbd> save board ·
+    <p><strong>Keys.</strong> <kbd>/</kbd> search · <kbd>Enter</kbd> while searching selects all matches ·
+      <kbd>Esc</kbd> clear · <kbd>Ctrl</kbd>+<kbd>A</kbd> select matches · <kbd>Del</kbd> delete selection · <kbd>Ctrl</kbd>+<kbd>S</kbd> save board ·
       <kbd>Ctrl</kbd>+<kbd>Z</kbd> undo · double-click a tile to open the inspector.</p>
     <p><strong>Importing.</strong> TierMaker builds its item carousel in JavaScript and blocks
       server-side readers, so a browser on its own can't reliably scrape it. Run
