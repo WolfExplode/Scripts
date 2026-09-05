@@ -81,7 +81,8 @@ main.panning{cursor:grabbing}
 #canvas{padding:10px;display:flex;flex-direction:column;gap:14px;transform-origin:0 0;width:fit-content}
 #board{display:flex;flex-direction:column;gap:var(--gap);min-width:1500px;
   border:1px solid var(--line);border-radius:8px;overflow:hidden}
-.add-tier{align-self:flex-start;margin:5px 6px 6px;padding:3px 8px;font-size:12px}
+.tier-actions{display:flex;align-items:center;gap:6px;margin:5px 6px 6px}
+.add-tier{padding:3px 8px;font-size:12px}
 .tier{display:flex;min-height:104px;background:var(--panel);}
 .tier + .tier{border-top:1px solid var(--line)}
 .tlabel{width:var(--labelw);flex:none;display:flex;flex-direction:column;align-items:center;
@@ -171,6 +172,8 @@ main.panning{cursor:grabbing}
 .item.sel .rank-shift.horizontal{display:flex}
 .rank-shift.horizontal.left{right:calc(100% - 7px)}
 .rank-shift.horizontal.right{left:calc(100% - 7px)}
+.rank-shift.horizontal.reordered{left:calc(100% - 7px);color:var(--accent2)}
+.rank-shift.horizontal.reordered b{margin-left:0;font-size:9px}
 
 /* caption: ALWAYS in the DOM so browser Ctrl+F can find + scroll to it.
    opacity:0 keeps native find working (display:none / visibility:hidden would not). */

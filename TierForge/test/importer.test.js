@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { originalWikiImageUrl, parseCharacters, parseTemplateCode, parseWikiCards, prettyName,
+import { originalWikiImageUrl, parseCharacters, parseTemplateCode, parseWikiCards, parseWikiRelics, prettyName,
   selectNamedItems } from '../src/importer.js';
 
 test('prettyName derives a readable item name', () => {
@@ -33,9 +33,21 @@ test('parseWikiCards extracts searchable metadata', () => {
   assert.equal(card.notes, 'Cost 2. Deal 12 damage.');
 });
 
+test('parseWikiRelics extracts relic metadata and original image URLs', () => {
+  const html = '<div class="relic-box" data-name="Arcane Scroll" data-rarity="Common" data-character="Any" data-ancient-upgrade="Yes" data-tags="Draw, Magic">' +
+    '<span class="img-base"><img src="/images/thumb/StS2_ArcaneScroll.png/80px-StS2_ArcaneScroll.png"></span>' +
+    '<div class="relic-desc">Draw <b>2</b> cards.</div></div>';
+  const [relic] = parseWikiRelics(html);
+  assert.equal(relic.name, 'Arcane Scroll');
+  assert.equal(relic.src, 'https://slaythespire.wiki.gg/images/StS2_ArcaneScroll.png');
+  assert.deepEqual(relic.tags, ['Common', 'Any', 'Ancient', 'Draw', 'Magic']);
+  assert.equal(relic.notes, 'Draw 2 cards.');
+});
+
 test('named item selection is punctuation-insensitive and optional', () => {
   const items = [{ name: 'Ashen Strike' }, { name: 'All For One' }, { name: 'Pomander' }];
   assert.deepEqual(selectNamedItems(items, ['ashen-strike', 'All_for_One']), items.slice(0, 2));
+  assert.deepEqual(selectNamedItems(items, ['80px StS2Pomander']), items.slice(2));
   assert.equal(selectNamedItems(items), items);
   assert.deepEqual(selectNamedItems(items, []), []);
 });

@@ -32,8 +32,10 @@ Open **Import**, paste a TierMaker `/list/` or `/create/` URL, and select how im
 - **Local files**: download into `Images/`. Best for normal use; re-import manually to refresh.
 - **Embedded**: put base64 image data inside the Board. Portable, but produces large JSON files.
 
-The **Slay the Spire 2: import all cards** shortcut reads the wiki's Cards List and defaults to
-local files. **Merge into current board** adds only new entries. **Relink items** inventories the
+The **Slay the Spire 2: import all cards/relics** shortcuts read the wiki's Cards List or Relics
+List and default to local files. The Neow relic TierMaker list is detected automatically and
+relinks against the Relics List, including TierMaker's filename-style tile labels. **Merge into
+current board** adds only new entries. **Relink items** inventories the
 current board and `Images/` first, keeps items that are already saved locally, then checks only the
 unresolved names against the wiki. It preserves tiers, tags, and notes and downloads only matching
 wiki images that are still missing.

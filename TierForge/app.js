@@ -121,6 +121,20 @@ function placementPositions(layout){
   Object.keys(S.items).forEach((id,index)=>{ if(!positions.has(id))positions.set(id,{tier:S.tiers.length,index}); });
   return positions;
 }
+function sharedPeerCrossings(id,current,target,currentPositions,targetPositions){
+  let ahead=0, behind=0;
+  currentPositions.forEach((peer,peerId)=>{
+    if(peerId===id||peer.tier!==current.tier)return;
+    const otherPeer=targetPositions.get(peerId);
+    if(!otherPeer||otherPeer.tier!==target.tier)return;
+    const peerWasBefore=peer.index<current.index;
+    const peerIsBefore=otherPeer.index<target.index;
+    if(peerWasBefore===peerIsBefore)return;
+    if(peerWasBefore)ahead++;
+    else behind++;
+  });
+  return {ahead,behind};
+}
 function comparisonFor(id){
   if(!compareSubBoardId)return null;
   const other=S.subBoards.find(sub=>sub.id===compareSubBoardId);
@@ -131,14 +145,25 @@ function comparisonFor(id){
   const current=comparisonState.current.get(id);
   const target=comparisonState.target.get(id);
   if(!current||!target)return null;
+  const currentRanked=current.tier<S.tiers.length;
+  const targetRanked=target.tier<S.tiers.length;
+  // The pool is a categorical "unranked" state, not an extra tier. A move
+  // into or out of it should not be reported as a numeric tier change.
+  if(currentRanked!==targetRanked){
+    return {rankStatusChange:targetRanked?'ranked':'unranked',other};
+  }
+  if(!currentRanked)return null;
   const tierPlaces=current.tier-target.tier;
-  // Horizontal positions are comparable only within the same ranked tier.
-  // Crossing tiers already has a vertical result; comparing the two row indexes
-  // would otherwise produce a misleading left/right shift.
-  const positionPlaces=current.tier===target.tier&&current.tier<S.tiers.length
-    ?current.index-target.index:0;
-  if(!tierPlaces&&!positionPlaces)return null;
-  return {tierPlaces,positionPlaces,other};
+  // Crossing tiers already has a vertical result. Comparing row indexes as
+  // well would mix two different kinds of movement.
+  if(tierPlaces)return {tierPlaces,positionPlaces:0,other};
+  // Within a tier, count only shared peers whose ordering relative to this item
+  // actually changed. Board-specific items do not create artificial shifts.
+  const {ahead,behind}=sharedPeerCrossings(id,current,target,
+    comparisonState.current,comparisonState.target);
+  if(!ahead&&!behind)return null;
+  if(ahead&&behind)return {tierPlaces:0,positionPlaces:0,movedAhead:ahead,movedBehind:behind,other};
+  return {tierPlaces:0,positionPlaces:ahead||-behind,movedAhead:ahead,movedBehind:behind,other};
 }
 function snapshot(){ storeActiveSubBoard(); undoStack.push(JSON.stringify(S)); if(undoStack.length>40)undoStack.shift(); }
 function undo(){ if(!undoStack.length)return toast('Nothing to undo');
@@ -158,23 +183,24 @@ function completeLayout(layout){
   Object.keys(S.items).forEach(id=>{ if(!seen.has(id))complete.pool.push(id); });
   return complete;
 }
-function moveBeforeInLayout(layout,ids,beforeId){
+function moveToDestinationInLayout(layout,ids,ref,beforeId){
   const lists=[...(layout.tiers||[]).map(t=>t.items),layout.pool];
-  const destination=lists.find(list=>list.includes(beforeId));
+  const destination=ref==='pool'?layout.pool:layout.tiers.find(t=>t.id===ref)?.items;
   if(!destination)return false;
   const moving=new Set(ids);
   lists.forEach(list=>{ for(let i=list.length-1;i>=0;i--)if(moving.has(list[i]))list.splice(i,1); });
-  destination.splice(destination.indexOf(beforeId),0,...ids);
+  const at=beforeId&&!moving.has(beforeId)?destination.indexOf(beforeId):-1;
+  destination.splice(at<0?destination.length:at,0,...ids);
   return true;
 }
 function moveItems(ids,ref,beforeId,syncSubBoards=false){
   ids=ids.filter(i=>S.items[i]); if(!ids.length)return;
   snapshot();
-  if(syncSubBoards&&beforeId&&!ids.includes(beforeId)){
+  if(syncSubBoards){
     let synced=0;
     S.subBoards.forEach(sub=>{
       sub.layout=completeLayout(sub.layout);
-      if(moveBeforeInLayout(sub.layout,ids,beforeId))synced++;
+      if(moveToDestinationInLayout(sub.layout,ids,ref,beforeId))synced++;
     });
     applySubBoardLayout(activeSubBoard().layout);
     persist(); render();
@@ -219,19 +245,30 @@ function itemNode(id){
   const el=document.createElement('div');
   const comparison=comparisonFor(id);
   el.className='item'+(sel.has(id)?' sel':'')+(it.notes?' hasnote':'')+(comparison?' compared':'');
-  el.dataset.id=id; el.draggable=true;
+  el.dataset.id=id; el.draggable=false;
   const tierShift=Math.abs(comparison?.tierPlaces||0), positionShift=Math.abs(comparison?.positionPlaces||0);
+  const reorderedAhead=comparison?.movedAhead&&comparison?.movedBehind?comparison.movedAhead:0;
+  const reorderedBehind=reorderedAhead?comparison.movedBehind:0;
+  const reorderedShift=reorderedAhead+reorderedBehind;
+  const statusChange=comparison?.rankStatusChange||null;
   const tierDirection=comparison?.tierPlaces>0?'up':'down';
   const positionDirection=comparison?.positionPlaces>0?'left':'right';
+  const statusDirection=statusChange==='ranked'?'up':'down';
   const changes=[];
+  if(statusChange)changes.push(statusChange==='ranked'
+    ?`${comparison.other.name} ranks this item`
+    :`Unranked on ${comparison.other.name}`);
   if(tierShift)changes.push(`${comparison.other.name} ranks this ${tierShift} tier${tierShift===1?'':'s'} ${tierDirection==='up'?'higher':'lower'}`);
-  if(positionShift)changes.push(`${comparison.other.name} places this ${positionShift} spot${positionShift===1?'':'s'} to the ${positionDirection}`);
+  if(reorderedShift)changes.push(`${comparison.other.name} moves this ahead of ${reorderedAhead} shared item${reorderedAhead===1?'':'s'} and behind ${reorderedBehind} shared item${reorderedBehind===1?'':'s'}`);
+  else if(positionShift)changes.push(`${comparison.other.name} moves this ${positionDirection==='left'?'ahead of':'behind'} ${positionShift} shared item${positionShift===1?'':'s'}`);
   el.title=it.name+(it.notes?'\n'+it.notes:'')+(changes.length?`\n${changes.join('\n')}`:'');
   const meta=[(it.tags||[]).join(', '),it.notes||''].filter(Boolean).join(' · ');
   el.innerHTML=(it.img?`<img src="${esc(it.img)}" alt="${esc(it.name)}" loading="lazy"
       onerror="this.style.display='none';this.parentNode.classList.add('noimg')">`:'')
     +`<span class="badge">●</span>`
+    +(statusChange?`<span class="rank-shift vertical status ${statusDirection}" aria-label="${esc(changes[0])}">${movementArrow(statusDirection)}<b>${statusChange==='ranked'?'R':'U'}</b></span>`:'')
     +(tierShift?`<span class="rank-shift vertical ${tierDirection}" aria-label="${esc(changes[0])}">${movementArrow(tierDirection)}<b>${tierShift}</b></span>`:'')
+    +(reorderedShift?`<span class="rank-shift horizontal reordered" aria-label="${esc(changes[changes.length-1])}"><b>↔${reorderedShift}</b></span>`:'')
     +(positionShift?`<span class="rank-shift horizontal ${positionDirection}" aria-label="${esc(changes[changes.length-1])}">${movementArrow(positionDirection)}<b>${positionShift}</b></span>`:'')
     +`<span class="cap">${esc(it.name)}${meta?`<span class="meta"> — ${esc(meta)}</span>`:''}</span>`;
   if(!it.img) el.style.cssText+='background:#2a3040;display:flex;align-items:center;justify-content:center';
@@ -265,9 +302,12 @@ function render(){
       <div class="drop" data-list="${t.id}"></div>`;
     fillDrop($('.drop',row),t.items); board.appendChild(row);
   });
-  const addTier=document.createElement('button');
-  addTier.id='btnAddTier'; addTier.className='add-tier'; addTier.textContent='+ Add tier';
-  board.appendChild(addTier);
+  const tierActions=document.createElement('div');
+  tierActions.className='tier-actions';
+  tierActions.innerHTML='<button id="btnAddTier" class="add-tier">+ Add tier</button>'
+    +'<button id="btnRegenerateTierColors" class="add-tier icon-button" title="Generate a new tier color palette" aria-label="Generate a new tier color palette">'
+    +icon('palette')+'</button>';
+  board.appendChild(tierActions);
   fillDrop($('#pool'),S.pool);
   $('#poolcount').textContent=`${S.pool.length} item${S.pool.length===1?'':'s'}`;
   const total=Object.keys(S.items).length;
@@ -285,6 +325,7 @@ function flatOrder(){ return [...S.tiers.flatMap(t=>t.items),...S.pool]; }
 /* ============================ EVENTS: board ============================ */
 document.addEventListener('click',e=>{
   if(e.target.closest('#btnAddTier')){ addTier(); return; }
+  if(e.target.closest('#btnRegenerateTierColors')){ regenerateTierColors(); return; }
   const tool=e.target.closest('.tools button');
   if(tool){ const tid=tool.closest('.tier').dataset.tier; tierAction(tid,tool.dataset.act); return; }
   const it=e.target.closest('.item');
@@ -317,10 +358,11 @@ document.addEventListener('input',e=>{ if(e.target.classList.contains('txt')){
   const t=S.tiers.find(t=>t.id===tid); if(t){ t.label=e.target.textContent.trim(); persist(); } }});
 
 /* ============================ DRAG & DROP ============================ */
-let dragIds=[], dragPreview=null, dropPlaceholders=[], dragBeforeId=null, dragTarget=null;
-const clearDragImage=document.createElement('canvas');
-clearDragImage.width=clearDragImage.height=1;
+let dragIds=[], dragPreview=null, dropPlaceholders=[], dragBeforeId=null, dragTarget=null,
+  heldItemPress=null, dragClientX=0, dragClientY=0, suppressItemClick=false,
+  cancelledItemDrag=false;
 const SNAP_HOLD_RATIO=.18;
+const DRAG_START_DISTANCE=4;
 
 function beginDragPreview(item,e,count){
   const rect=item.getBoundingClientRect(), baseWidth=item.offsetWidth||TILE_SIZE;
@@ -347,6 +389,11 @@ function clearDrag(){
   document.body.classList.remove('card-dragging');
   $$('.dragging').forEach(el=>el.classList.remove('dragging'));
   $$('.drop.over').forEach(el=>el.classList.remove('over'));
+}
+function cancelItemDrag(){
+  if(!dragIds.length)return false;
+  heldItemPress=null; cancelledItemDrag=true; suppressItemClick=true; clearDrag();
+  return true;
 }
 
 /* Find a position in a wrapped flex grid. Horizontal position chooses a slot in
@@ -405,40 +452,81 @@ function placeDropPlaceholders(cont,placement){
   else placement.anchor.el.before(...dropPlaceholders);
 }
 
-document.addEventListener('dragstart',e=>{ const item=e.target.closest('.item'); if(!item)return;
+function beginItemDrag(item,startX,startY,x,y){
   const id=item.dataset.id;
   if(!sel.has(id)){sel.clear();sel.add(id);syncSel();}
   const selected=new Set(sel);
   dragIds=flatOrder().filter(itemId=>selected.has(itemId));
-  e.dataTransfer.effectAllowed='move'; e.dataTransfer.setData('text/plain',id);
-  e.dataTransfer.setDragImage(clearDragImage,0,0);
-  beginDragPreview(item,e,dragIds.length); document.body.classList.add('card-dragging');
+  beginDragPreview(item,{clientX:startX,clientY:startY},dragIds.length);
+  moveDragPreview(x,y); document.body.classList.add('card-dragging');
   requestAnimationFrame(()=>{
     seedDropPlaceholders(item,selected);
     dragIds.forEach(itemId=>$(`.item[data-id="${itemId}"]`)?.classList.add('dragging'));
+    updateHeldItemDrag(x,y);
   });
-});
-document.addEventListener('drag',e=>moveDragPreview(e.clientX,e.clientY));
-document.addEventListener('dragend',clearDrag);
-document.addEventListener('dragover',e=>{ const d=e.target.closest('.drop'); if(!d||!dragIds.length)return;
-  e.preventDefault(); e.dataTransfer.dropEffect='move'; moveDragPreview(e.clientX,e.clientY);
-  $$('.drop.over').forEach(el=>el!==d&&el.classList.remove('over')); d.classList.add('over');
-  if(pointerInHeldSlot(d,e.clientX,e.clientY))return;
-  const placement=placementAt(d,e.clientX,e.clientY);
-  dragBeforeId=placement.beforeId; dragTarget=d; placeDropPlaceholders(d,placement);
-});
-document.addEventListener('drop',e=>{ const d=e.target.closest('.drop'); if(!d||!dragIds.length)return;
-  e.preventDefault();
+}
+function dropAtPoint(x,y,ctrlKey=false,metaKey=false){
+  const d=document.elementFromPoint(x,y)?.closest('.drop');
+  if(!d||!dragIds.length){ clearDrag(); return; }
   const ids=[...dragIds], destination=d.dataset.list;
-  const beforeId=dragTarget===d?dragBeforeId:placementAt(d,e.clientX,e.clientY).beforeId;
-  const syncSubBoards=(e.ctrlKey||e.metaKey)&&!!beforeId;
+  const beforeId=placementAt(d,x,y).beforeId;
+  const syncSubBoards=ctrlKey||metaKey;
   clearDrag(); moveItems(ids,destination,beforeId,syncSubBoards);
+}
+function updateHeldItemDrag(x=dragClientX,y=dragClientY){
+  if(!dragIds.length)return;
+  dragClientX=x; dragClientY=y; moveDragPreview(x,y);
+  const d=document.elementFromPoint(x,y)?.closest('.drop');
+  if(!d){ $$('.drop.over').forEach(el=>el.classList.remove('over')); return; }
+  $$('.drop.over').forEach(el=>el!==d&&el.classList.remove('over')); d.classList.add('over');
+  if(pointerInHeldSlot(d,x,y))return;
+  const placement=placementAt(d,x,y);
+  dragBeforeId=placement.beforeId; dragTarget=d; placeDropPlaceholders(d,placement);
+}
+
+// Item dragging stays in normal mouse mode so wheel zoom and a chorded middle
+// button remain available while the primary button continues to hold the item.
+document.addEventListener('mousedown',e=>{
+  if(e.button!==0)return;
+  const item=e.target.closest('.item');
+  if(item)heldItemPress={item,startX:e.clientX,startY:e.clientY};
 });
+window.addEventListener('mousemove',e=>{
+  if(!heldItemPress)return;
+  if(!(e.buttons&1)){ heldItemPress=null; if(dragIds.length)clearDrag(); return; }
+  if(!dragIds.length&&Math.hypot(e.clientX-heldItemPress.startX,e.clientY-heldItemPress.startY)>=DRAG_START_DISTANCE){
+    beginItemDrag(heldItemPress.item,heldItemPress.startX,heldItemPress.startY,e.clientX,e.clientY);
+  }else if(dragIds.length)updateHeldItemDrag(e.clientX,e.clientY);
+});
+window.addEventListener('mouseup',e=>{
+  if(e.button!==0)return;
+  if(cancelledItemDrag){ cancelledItemDrag=false; e.preventDefault();
+    setTimeout(()=>{ suppressItemClick=false; },0); return; }
+  if(!heldItemPress)return;
+  const wasDragging=!!dragIds.length;
+  heldItemPress=null;
+  if(wasDragging){ e.preventDefault(); suppressItemClick=true;
+    dropAtPoint(e.clientX,e.clientY,e.ctrlKey,e.metaKey);
+    setTimeout(()=>{ suppressItemClick=false; },0); }
+});
+window.addEventListener('blur',()=>{ heldItemPress=null; cancelledItemDrag=false; suppressItemClick=false;
+  if(dragIds.length)clearDrag(); });
+document.addEventListener('click',e=>{
+  if(!suppressItemClick)return;
+  suppressItemClick=false; e.preventDefault(); e.stopImmediatePropagation();
+},true);
 
 /* ============================ KEYBOARD ============================ */
 document.addEventListener('keydown',e=>{
+  if(e.key==='Escape'&&cancelItemDrag()){ e.preventDefault(); return; }
   if(e.key==='Escape'&&!$('#settingsMenu').hidden){ $('#settingsMenu').hidden=true; return; }
   const typing=/^(INPUT|TEXTAREA)$/.test(e.target.tagName)||e.target.isContentEditable;
+  if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='f'){
+    e.preventDefault();
+    $('#q').focus();
+    $('#q').select();
+    return;
+  }
   if(e.key==='/'&&!typing){ e.preventDefault(); $('#q').focus(); $('#q').select(); return; }
   if(e.key==='Escape'){ if(typing&&e.target.id==='q'){ $('#q').value=''; applyFilter(); e.target.blur(); }
     else { sel.clear(); syncSel(); closeInsp(); } return; }
@@ -481,8 +569,13 @@ function openInsp(id){
 (()=>{
   const main=document.querySelector('main'), canvas=$('#canvas');
   const view={x:0,y:0,scale:1};
-  const MIN=1, MAX=5;
-  function apply(){ canvas.style.transform=`translate(${view.x}px,${view.y}px) scale(${view.scale})`; }
+  // Permit a little extra context around larger boards without making tiles too small.
+  const MIN=.85, MAX=5;
+  function apply(){
+    canvas.style.transform=`translate(${view.x}px,${view.y}px) scale(${view.scale})`;
+    // Keep the insertion slot under the held item as the canvas moves beneath it.
+    if(dragIds.length)updateHeldItemDrag();
+  }
 
   let dragging=false, lastX=0, lastY=0;
   main.addEventListener('mousedown',e=>{
@@ -596,6 +689,12 @@ $('#subboardTabs').onclick=e=>{
 };
 function addTier(){ snapshot();
   S.tiers.push({id:uid(),label:'New',color:TM_COLORS[S.tiers.length%10],items:[]}); persist(); render(); }
+function regenerateTierColors(){
+  if(!S.tiers.length)return;
+  snapshot();
+  S.tiers.forEach((tier,index)=>{ tier.color=TM_COLORS[Math.min(index,TM_COLORS.length-1)]; });
+  persist(); render(); toast('Regenerated tier colors');
+}
 function selectHits(){ const terms=parseQuery($('#q').value.trim());
   setSel(Object.values(S.items).filter(it=>matches(it,terms)).map(i=>i.id));
   toast(`${sel.size} selected`); }
@@ -614,7 +713,7 @@ async function refreshHelperState(){
   if(helperBase){ el.innerHTML=`<b style="color:var(--ok)">Local runtime connected</b> (${esc(helperBase)}).
     Paste any <code>tiermaker.com/list/…</code> or <code>/create/…</code> link — it fetches and
     rebuilds tiers, colours, images and placements directly. The Slay the Spire 2 button below
-    imports every card from the wiki's Cards List straight into the pool. Boards also now save to
+    imports every card or relic from the matching wiki list straight into the pool. Boards also now save to
     this folder's <code>Saved/</code> directory instead of the browser.`; }
   else { el.innerHTML=`<b style="color:var(--accent2)">No local runtime.</b> TierMaker builds its item
     list in JavaScript and blocks readers, and the Slay the Spire 2 wiki blocks plain browser
@@ -957,11 +1056,24 @@ function mergeItemsIntoPool(pack){
    explicit button, so nothing requires the guess to land. Add more games here
    as they come up; each needs its own parser wired into the runtime's /import. */
 const GAME_SOURCES=[
-  {id:'sts2', name:'Slay the Spire 2',
+  {id:'sts2-relics', name:'Slay the Spire 2',
+   match:/\b(?:slay the spire (?:2|ii|two)|sts ?2)\b.*\brelics?\b|\brelics?\b.*\b(?:slay the spire (?:2|ii|two)|sts ?2)\b/,
+   wiki:'https://slaythespire.wiki.gg/wiki/Slay_the_Spire_2:Relics_List', itemType:'relics'},
+  {id:'sts2-cards', name:'Slay the Spire 2',
    match:/\bslay the spire (?:2|ii|two)\b|\bsts ?2\b/,
-   wiki:'https://slaythespire.wiki.gg/wiki/Slay_the_Spire_2:Cards_List'},
+   wiki:'https://slaythespire.wiki.gg/wiki/Slay_the_Spire_2:Cards_List', itemType:'cards'},
 ];
 const normName=s=>String(s||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+/* TierMaker sometimes labels its tile from the wiki filename rather than the
+   human title ("80px StS2ArcaneScroll"). These aliases let that supplied
+   Neow relic list resolve to the Relics List without changing the board name. */
+function sourceNameKeys(value){
+  const normalized=normName(value), keys=new Set([normalized]);
+  let loose=normalized.replace(/^zzzzz\d+/,'').replace(/^\d+px/,'').replace(/^sts2/,'');
+  if(loose) keys.add(loose);
+  const repeated=/^(.+?)\1$/.exec(loose); if(repeated) keys.add(repeated[1]);
+  return [...keys].filter(Boolean);
+}
 /** Board title first ("Slay the Spire 2 tier list"), falling back to where it
  * came from — a TierMaker board's title is often just the character name
  * ("Ironclad"), but its source URL says "…-slay-the-spire-ii-…". Punctuation
@@ -977,12 +1089,14 @@ function renderGameSources(){
   const detected=detectGameSource(S);
   wrap.innerHTML=GAME_SOURCES.map(g=>`
     <div class="row" style="gap:6px;margin-top:2px">
-      <button data-imp="${g.id}" class="${g===detected?'primary':'ghost'}">${esc(g.name)}: import all cards</button>
-      <button data-relink="${g.id}" class="ghost">Relink items</button>
-      ${g===detected?'<span class="muted" style="font-size:12px">↩ detected from the board title</span>':''}
-    </div>`).join('');
+      <button data-imp="${g.id}" class="${g===detected?'primary':'ghost'}">${esc(g.name)}: import all ${g.itemType}</button>
+    </div>`).join('')+`
+    <div class="row" style="gap:6px;margin-top:2px">
+      <button data-relink-all class="ghost">Relink items</button>
+      <span class="muted" style="font-size:12px">checks saved images, cards, and relics${detected?' · ↩ detected from the board title':''}</span>
+    </div>`;
   $$('button[data-imp]',wrap).forEach(b=>b.onclick=()=>quickWikiImport(GAME_SOURCES.find(g=>g.id===b.dataset.imp)));
-  $$('button[data-relink]',wrap).forEach(b=>b.onclick=()=>relinkItems(GAME_SOURCES.find(g=>g.id===b.dataset.relink)));
+  $('[data-relink-all]',wrap).onclick=()=>relinkItems();
 }
 
 function quickWikiImport(src){
@@ -998,7 +1112,7 @@ $('#localimgs').onchange=()=>{ if($('#localimgs').checked) $('#embedimgs').check
  * already linked locally are retained; other local files and wiki entries are
  * matched by punctuation-insensitive name. Only relevant missing wiki images
  * are downloaded. Tags, notes, names and placements stay put. */
-async function relinkItems(src){
+async function relinkItems(sources=GAME_SOURCES){
   if(helperBase===null) helperBase=await findHelper();
   if(!helperBase) return toast('Needs the local runtime—run TierForge.cmd, then reload.');
   $('#log').textContent='';
@@ -1032,36 +1146,38 @@ async function relinkItems(src){
   log(`${alreadyLocal.length} item(s) already point to saved files; ${localMatches.length} more matched the local cache.`);
 
   let wikiMatches=[]; let missed=[...unresolved];
-  if(unresolved.length && src){
-    log(`Checking ${unresolved.length} remaining item(s) against ${src.name} wiki metadata…`);
+  const wikiSources=Array.isArray(sources)?sources:(sources?[sources]:[]);
+  for(const src of wikiSources){
+    if(!missed.length) break;
+    log(`Checking ${missed.length} remaining item(s) against ${src.itemType||src.name} wiki metadata…`);
     try{
       const catalog=await importViaHelper(helperBase,src.wiki,false,log);
       const wikiByName={};
       (Array.isArray(catalog.items)?catalog.items:Object.values(catalog.items))
-        .forEach(it=>{ wikiByName[normName(it.name)]=it; });
-      wikiMatches=unresolved.filter(it=>wikiByName[normName(it.name)]);
-      missed=unresolved.filter(it=>!wikiByName[normName(it.name)]);
-      log(`${wikiMatches.length} item(s) are from the wiki; ${missed.length} are local/custom or unrecognized.`);
-      if(wikiMatches.length){
-        log(`Saving only those ${wikiMatches.length} wiki image(s)…`);
+        .forEach(it=>{ sourceNameKeys(it.name).forEach(key=>{ wikiByName[key]=it; }); });
+      const wikiItem=it=>sourceNameKeys(it.name).map(key=>wikiByName[key]).find(Boolean);
+      const matches=missed.filter(wikiItem);
+      missed=missed.filter(it=>!wikiItem(it));
+      log(`${matches.length} item(s) matched the ${src.itemType||src.name} catalog.`);
+      if(matches.length){
+        log(`Saving only those ${matches.length} wiki image(s)…`);
         const pack=await importViaHelper(helperBase,src.wiki,false,log,true,true,
-          wikiMatches.map(it=>it.name));
+          matches.map(it=>it.name));
         const savedByName={};
         (Array.isArray(pack.items)?pack.items:Object.values(pack.items))
           .filter(it=>/^\/?Images\//i.test(it.img||''))
-          .forEach(it=>{ savedByName[normName(it.name)]=it; });
+          .forEach(it=>{ sourceNameKeys(it.name).forEach(key=>{ savedByName[key]=it; }); });
         const saved=[]; const failed=[];
-        wikiMatches.forEach(it=>{
-          const w=savedByName[normName(it.name)];
+        matches.forEach(it=>{
+          const w=sourceNameKeys(it.name).map(key=>savedByName[key]).find(Boolean);
           if(w){ it.img=w.img; it.src=w.src||w.img||it.src; saved.push(it); }
           else failed.push(it);
         });
-        wikiMatches=saved; missed.push(...failed);
+        wikiMatches.push(...saved); missed.push(...failed);
         if(failed.length) log(`${failed.length} matched wiki image(s) could not be saved and were left unchanged.`);
       }
     }catch(e){
-      log('Wiki lookup unavailable: '+e.message);
-      wikiMatches=[]; missed=[...unresolved];
+      log(`${src.itemType||src.name} wiki lookup unavailable: ${e.message}`);
     }
   }
   persist(); render();
@@ -1078,9 +1194,8 @@ async function relinkItems(src){
  * matching works for every imported list. */
 async function autoRelinkImportedItems(){
   if(!$('#autorelink')?.checked || !Object.keys(S.items).length) return;
-  const source=detectGameSource(S);
   log('Auto-relinking imported items to saved images…');
-  await relinkItems(source);
+  await relinkItems();
 }
 
 $('#btnFetch').onclick=async()=>{
@@ -1089,16 +1204,17 @@ $('#btnFetch').onclick=async()=>{
   const url=raw.split('#')[0].replace(/^http:/,'https:');
   try{
     if(/slaythespire\.wiki\.gg\//i.test(url)){
+      const wikiItemType=/relics?_list/i.test(url)?'relics':'cards';
       if(helperBase===null) helperBase=await findHelper();
       if(!helperBase) throw new Error('This needs the local runtime—run TierForge.cmd from the '
         +'TierForge folder, then reload this page. The wiki blocks plain browser fetches.');
       log('Using local runtime at '+helperBase+' …');
       const pack=await importViaHelper(helperBase,url,$('#embedimgs').checked,log,$('#localimgs').checked);
       if($('#mergeimp').checked){ snapshot(); const added=mergeItemsIntoPool(pack);
-        log(`Merged ${added} new card(s) into the pool (${pack.items.length-added} already present).`); }
-      else { S=normalize(pack); log(`Imported ${pack.items.length} cards.`); }
+        log(`Merged ${added} new ${wikiItemType} into the pool (${pack.items.length-added} already present).`); }
+      else { S=normalize(pack); log(`Imported ${pack.items.length} ${wikiItemType}.`); }
       sel.clear(); persist(); render(); await autoRelinkImportedItems();
-      return toast('Imported '+pack.items.length+' cards');
+      return toast('Imported '+pack.items.length+' '+wikiItemType);
     }
 
     if(!/tiermaker\.com\/(list|create)\//i.test(url))
@@ -1399,16 +1515,24 @@ async function embedAll(report=()=>{}){
 
 $('#expPng').onclick=async()=>{
   const el=$('#explog'); el.textContent='Loading images…';
-  const S_=S, tileSize=TILE_SIZE, pad=3, labelw=Math.max(120,tileSize*1.6);
+  const scale=Number($('#pngScale').value)||4;
+  const S_=S, subBoardName=activeSubBoard()?.name||'Main',
+    exportTitle=`${S_.title} — ${subBoardName}`,
+    tileSize=TILE_SIZE, pad=3, labelw=Math.max(120,tileSize*1.6);
   const perRow=Math.max(4,Math.round(1400/(tileSize+pad)));
   const cvs=document.createElement('canvas'), ctx=cvs.getContext('2d');
   const rows=S_.tiers.map(t=>({...t,lines:Math.max(1,Math.ceil(t.items.length/perRow))}));
   const width=labelw+perRow*(tileSize+pad)+pad;
   const height=rows.reduce((a,r)=>a+r.lines*(tileSize+pad)+pad,0)+40;
-  cvs.width=width; cvs.height=height;
+  // Use a larger backing canvas while keeping all drawing coordinates in board pixels.
+  // This preserves the layout but produces a sharper, print-friendly PNG.
+  cvs.width=width*scale; cvs.height=height*scale;
+  ctx.scale(scale,scale);
+  ctx.imageSmoothingEnabled=true;
+  ctx.imageSmoothingQuality='high';
   ctx.fillStyle='#0f1115'; ctx.fillRect(0,0,width,height);
   ctx.font='bold 20px Segoe UI,sans-serif'; ctx.fillStyle='#e7eaf0'; ctx.textBaseline='middle';
-  ctx.fillText(S_.title,10,20);
+  ctx.fillText(exportTitle,10,20);
   const cache=new Map(); let y=40, failed=0;
   for(const r of rows){
     const h=r.lines*(tileSize+pad)+pad;
@@ -1432,7 +1556,7 @@ $('#expPng').onclick=async()=>{
     }
     y+=h;
   }
-  try{ cvs.toBlob(b=>{ download(slug(S_.title)+'.png',b);
+  try{ cvs.toBlob(b=>{ download(slug(`${S_.title}-${subBoardName}`)+'.png',b);
     el.textContent=`Done${failed?` — ${failed} image(s) could not be loaded; run "Embed all images" and retry.`:''}`; }); }
   catch(err){ el.textContent='Canvas is tainted — run "Embed all images" first, then export again.'; }
 };

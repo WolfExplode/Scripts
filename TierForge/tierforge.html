@@ -50,7 +50,7 @@
     <button id="btnBoards">Boards</button>
     <div class="sep"></div>
     <div id="searchbox">
-      <input id="q" placeholder="Search name, tag, note…  ( / )" spellcheck="false">
+      <input id="q" placeholder="Search name, tag, note…  ( / or Ctrl+F )" spellcheck="false">
       <button id="btnClearSearch" type="button" title="Clear search" aria-label="Clear search">×</button>
     </div>
     <span id="qcount" class="muted"></span>
@@ -148,6 +148,12 @@
   <div class="dbody">
     <div class="row"><button id="expJson" class="primary">Board JSON</button>
       <button id="expPng">PNG image</button>
+      <label>Resolution <select id="pngScale" aria-label="PNG export resolution">
+        <option value="1">Standard (1×)</option>
+        <option value="2">High (2×)</option>
+        <option value="4" selected>Very high (4×)</option>
+        <option value="6">Ultra (6×)</option>
+      </select></label>
       <button id="expMd">Markdown</button>
       <button id="expCsv">CSV</button>
       <button id="expEmbed">Embed all images (offline pack)</button>
@@ -187,12 +193,21 @@
     <p><strong>Search syntax.</strong> Space-separated terms are ANDed. <code>tag:starter</code>,
       <code>tier:A</code>, <code>note:vuln</code>, <code>-word</code> to exclude, <code>"two words"</code>
       for a phrase.</p>
-    <p><strong>Keys.</strong> <kbd>/</kbd> search · <kbd>Enter</kbd> while searching selects all matches ·
+    <p><strong>Keys.</strong> <kbd>/</kbd> or <kbd>Ctrl</kbd>+<kbd>F</kbd> search · <kbd>Enter</kbd> while searching selects all matches ·
       <kbd>Esc</kbd> clear · <kbd>Ctrl</kbd>+<kbd>A</kbd> select matches · <kbd>Del</kbd> delete selection · <kbd>Ctrl</kbd>+<kbd>S</kbd> save board ·
       <kbd>Ctrl</kbd>+<kbd>Z</kbd> undo · double-click a tile to open the inspector.</p>
-    <p><strong>Syncing sub-boards.</strong> Hold <kbd>Ctrl</kbd> while dropping an item before another
-      item. Every sub-board moves the selection immediately left of that same right-hand item,
-      wherever it is ranked on that board.</p>
+    <p><strong>Navigating while dragging.</strong> Keep holding an item with the left mouse button,
+      then use the wheel to zoom or hold the middle mouse button and move to pan. The item remains
+      attached to the pointer and drops normally when you release the left button. Press
+      <kbd>Esc</kbd> to cancel the move.</p>
+    <p><strong>Comparison markers.</strong> Ranked/unranked changes use <code>R</code> or <code>U</code>,
+      and tier changes use vertical arrows. Within one tier, horizontal arrows count only shared
+      items that the card actually crossed; board-specific cards do not create false movement.
+      A <code>↔</code> marker means the card moved ahead of some shared items and behind others.</p>
+    <p><strong>Syncing sub-boards.</strong> Hold <kbd>Ctrl</kbd> while dropping an item to move the
+      selection into that tier on every sub-board. A matching insertion point is preserved where
+      possible; otherwise the selection is appended. Ctrl-dropping into the unranked pool moves it
+      into the pool on every sub-board.</p>
     <p><strong>Importing.</strong> TierMaker builds its item carousel in JavaScript and blocks
       server-side readers, so a browser on its own can't reliably scrape it. Run
       <code>TierForge.cmd</code> (or <code>npm run serve</code>) and open the page it hands you—the URL box then imports
