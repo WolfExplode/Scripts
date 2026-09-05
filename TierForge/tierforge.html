@@ -23,7 +23,10 @@
     <button id="btnHelp" class="ghost">?</button>
   </div>
   <div class="row">
-    <input id="q" placeholder="Search name, tag, note…  ( / )" spellcheck="false">
+    <div id="searchbox">
+      <input id="q" placeholder="Search name, tag, note…  ( / )" spellcheck="false">
+      <button id="btnClearSearch" type="button" title="Clear search" aria-label="Clear search">×</button>
+    </div>
     <span id="qcount" class="muted"></span>
     <button id="btnSelHits" title="Select every match">Select matches</button>
     <div class="sep"></div>
@@ -34,13 +37,8 @@
         <option value="hover">On hover</option>
       </select>
     </label>
-    <label class="row muted" style="gap:4px">Size
-      <input id="size" type="range" min="40" max="200" value="96" style="width:110px">
-    </label>
     <div class="spacer"></div>
     <span class="muted" id="selinfo"></span>
-    <button id="btnToPool" title="Send selection back to the pool">→ Pool</button>
-    <button id="btnClearSel" class="ghost">Deselect</button>
   </div>
 </header>
 
@@ -81,6 +79,7 @@
       <label class="row" style="gap:6px"><input type="checkbox" id="embedimgs"> Download &amp; embed images as data URLs (offline-safe, enables PNG export — slower)</label>
       <label class="row" style="gap:6px"><input type="checkbox" id="localimgs"> Download images to local files (refresh manually when the wiki updates)</label>
       <label class="row" style="gap:6px"><input type="checkbox" id="mergeimp"> Merge into current board instead of replacing</label>
+      <label class="row" style="gap:6px"><input type="checkbox" id="autorelink" checked> Auto-relink imported items to saved images</label>
       <div class="row"><button id="btnFetch" class="primary">Fetch &amp; import</button>
         <span class="muted" style="font-size:12px">…or use the bookmarklet on the Grab tab — that one can't be blocked.</span></div>
       <div id="gameSources"></div>
@@ -95,10 +94,13 @@
         live only in your browser's storage, not in the link) and any dragging you have done on the
         page but not saved.</div>
       <ol style="margin:0;padding-left:20px;line-height:1.9">
-        <li>Drag this to your bookmarks bar → <a id="bmk" style="font-weight:700;padding:2px 8px;
-          background:var(--panel2);border:1px solid var(--line);border-radius:6px">📋 TierForge grab</a></li>
+        <li>Drag this to your bookmarks bar → <a id="bmk" title="Drag to the bookmarks bar, or click to copy"
+          style="font-weight:700;padding:2px 8px;background:var(--panel2);border:1px solid var(--line);
+          border-radius:6px">📋 TierForge grab</a>
+          <button id="copyBmk" type="button" class="ghost">Copy bookmark code</button></li>
         <li>Open the TierMaker <code>/list/</code> or <code>/create/</code> page and let the items load.</li>
-        <li>Click the bookmarklet — it copies everything to your clipboard.</li>
+        <li>Click the bookmarklet. It copies everything; if clipboard access is denied, it opens a
+          copy box instead.</li>
         <li>Paste below and press <b>Load</b>.</li>
       </ol>
       <textarea id="pastegrab" placeholder='{"tierforge":1,…}  — or paste page HTML / the API JSON here'></textarea>

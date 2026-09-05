@@ -1,6 +1,7 @@
 "use strict";
 const $=(s,r=document)=>r.querySelector(s), $$=(s,r=document)=>[...r.querySelectorAll(s)];
 const uid=()=>Math.random().toString(36).slice(2,10);
+const TILE_SIZE=96;
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
 /* TierMaker's stock row palette, indexed by the colour number in templateCode */
@@ -13,7 +14,7 @@ let S=null, sel=new Set(), lastClicked=null, undoStack=[];
 function blankState(){
   return {v:1,title:'Untitled Tier List',source:'',
     tiers:DEFAULT_TIERS.map(([l,c])=>({id:uid(),label:l,color:c,items:[]})),
-    pool:[],items:{},opts:{size:96,labels:'find'}};
+    pool:[],items:{},opts:{labels:'find'}};
 }
 function snapshot(){ undoStack.push(JSON.stringify(S)); if(undoStack.length>40)undoStack.shift(); }
 function undo(){ if(!undoStack.length)return toast('Nothing to undo');
@@ -55,6 +56,7 @@ function applyFilter(){
     const ok=matches(it,terms); if(ok)hits++;
     el.classList.toggle('dim',!!q&&!ok); el.classList.toggle('hit',!!q&&ok); });
   $('#qcount').textContent=q?`${hits} match${hits===1?'':'es'}`:'';
+  $('#btnClearSearch').hidden=!q;
 }
 
 /* ============================ RENDER ============================ */
@@ -76,8 +78,7 @@ function fillDrop(node,ids){ const f=document.createDocumentFragment();
 
 function render(){
   document.body.className='lab-'+S.opts.labels;
-  document.documentElement.style.setProperty('--size',S.opts.size+'px');
-  $('#title').value=S.title; $('#labmode').value=S.opts.labels; $('#size').value=S.opts.size;
+  $('#title').value=S.title; $('#labmode').value=S.opts.labels;
 
   const board=$('#board'); board.replaceChildren();
   S.tiers.forEach((t,i)=>{
@@ -247,17 +248,10 @@ function openInsp(id){
 /* ============================ TOOLBAR ============================ */
 $('#title').oninput=e=>{ S.title=e.target.value; persist(); };
 $('#q').oninput=applyFilter;
+$('#btnClearSearch').onclick=()=>{ $('#q').value=''; applyFilter(); $('#q').focus(); };
 $('#labmode').onchange=e=>{ S.opts.labels=e.target.value; document.body.className='lab-'+e.target.value; persist(); };
-$('#size').oninput=e=>{ S.opts.size=+e.target.value;
-  document.documentElement.style.setProperty('--size',e.target.value+'px'); persist(); };
-$('#size').addEventListener('mousedown',e=>{ if(e.button!==1) return; e.preventDefault();
-  $('#size').value=96; $('#size').dispatchEvent(new Event('input')); });
-$('#labmode').addEventListener('mousedown',e=>{ if(e.button!==1) return; e.preventDefault();
-  $('#labmode').value='find'; $('#labmode').dispatchEvent(new Event('change')); });
 function addTier(){ snapshot();
   S.tiers.push({id:uid(),label:'New',color:TM_COLORS[S.tiers.length%10],items:[]}); persist(); render(); }
-$('#btnToPool').onclick=()=>sel.size&&moveItems([...sel],'pool',null);
-$('#btnClearSel').onclick=()=>{ sel.clear(); syncSel(); };
 $('#btnSelHits').onclick=selectHits;
 function selectHits(){ const terms=parseQuery($('#q').value.trim());
   setSel(Object.values(S.items).filter(it=>matches(it,terms)).map(i=>i.id));
@@ -355,17 +349,46 @@ async function renderBoards(){
   let list=[];
   try{ list=(await (await fetch(helperBase+'/boards')).json()).boards||[]; }catch(e){}
   wrap.innerHTML=list.length?list.map(b=>`<div class="row" style="padding:4px 0;border-bottom:1px solid var(--line)">
-      <span style="flex:1">${esc(b.name)}</span>
+      <span data-board-label style="flex:1">${esc(b.name)}</span>
       <small>${new Date(b.mtime).toLocaleString()}</small>
-      <button data-load="${esc(b.name)}">Load</button><button class="danger" data-drop="${esc(b.name)}">✕</button></div>`).join('')
+      <button data-load="${esc(b.name)}">Load</button><button class="danger" data-drop="${esc(b.name)}" title="Click once to arm deletion" aria-label="Delete board">✕</button></div>`).join('')
     :'<div class="muted">No saved boards yet.</div>';
+  $$('[data-board-label]',wrap).forEach(x=>x.ondblclick=()=>startInlineBoardRename(x));
   $$('button[data-load]',wrap).forEach(x=>x.onclick=async()=>{
     const r=await fetch(helperBase+'/boards/'+encodeURIComponent(x.dataset.load));
     if(!r.ok)return toast('Could not load that board');
     snapshot(); S=JSON.parse(await r.text()); sel.clear(); persist(); render(); dlgBoards.close(); });
   $$('button[data-drop]',wrap).forEach(x=>x.onclick=async()=>{
+    if(x.dataset.confirm!=='1'){
+      x.dataset.confirm='1';
+      x.textContent='🗑️';
+      x.title='Click again to delete this board';
+      x.setAttribute('aria-label','Confirm delete board');
+      return;
+    }
+    x.disabled=true;
     await fetch(helperBase+'/boards/'+encodeURIComponent(x.dataset.drop),{method:'DELETE'});
     renderBoards(); });
+}
+function startInlineBoardRename(label){
+  const oldName=label.textContent.trim();
+  const input=document.createElement('input'); input.value=oldName; input.style.flex='1';
+  label.replaceWith(input); input.focus(); input.select();
+  const save=async()=>{
+    if(input.dataset.saving)return;
+    const newName=input.value.trim();
+    if(!newName)return toast('Board name cannot be empty');
+    if(newName===oldName)return renderBoards();
+    input.dataset.saving='1';
+    const r=await fetch(helperBase+'/boards/'+encodeURIComponent(oldName)+'/rename',
+      {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:newName})});
+    if(!r.ok){ let msg='Could not rename that board'; try{ msg=(await r.json()).error||msg; }catch(e){} delete input.dataset.saving; return toast(msg); }
+    const result=await r.json(); renderBoards(); toast('Renamed board to "'+(result.name||newName)+'"');
+  };
+  input.onkeydown=e=>{
+    if(e.key==='Enter'){e.preventDefault();save();}
+    else if(e.key==='Escape')renderBoards();
+  };
 }
 $('#btnSaveBoard').onclick=async()=>{ const n=$('#boardname').value.trim()||'Board';
   S.title=n; const ok=await saveBoard(n); renderBoards(); toast(ok?'Saved':'Not saved—no local runtime'); };
@@ -400,9 +423,12 @@ async function findHelper(){
  * dialog's own #log panel) — a plain TierMaker template finishes in a couple
  * of polls, but ~600 embedded wiki images take tens of seconds, and this is
  * what lets you watch it go image by image instead of staring at a spinner. */
-async function importViaHelper(base,url,embed,onLine=log,local=false,cache=false){
-  const startRes=await fetch(base+'/import/start?'+new URLSearchParams({url,
-    ...(embed?{embed:'1'}:{}),...(local&&!embed?{images:'1'}:{}),...(cache?{cache:'1'}:{})}));
+async function importViaHelper(base,url,embed,onLine=log,local=false,cache=false,names=null){
+  const endpoint=base+'/import/start?'+new URLSearchParams({url,
+    ...(embed?{embed:'1'}:{}),...(local&&!embed?{images:'1'}:{}),...(cache?{cache:'1'}:{})});
+  const startRes=await fetch(endpoint,Array.isArray(names)?{
+    method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({names})
+  }:undefined);
   const start=await startRes.json().catch(()=>({}));
   if(!startRes.ok||start.error) throw new Error(start.error||('HTTP '+startRes.status));
   let since=0;
@@ -591,7 +617,7 @@ function renderGameSources(){
       ${g===detected?'<span class="muted" style="font-size:12px">↩ detected from the board title</span>':''}
     </div>`).join('');
   $$('button[data-imp]',wrap).forEach(b=>b.onclick=()=>quickWikiImport(GAME_SOURCES.find(g=>g.id===b.dataset.imp)));
-  $$('button[data-relink]',wrap).forEach(b=>b.onclick=()=>relinkFromWiki(GAME_SOURCES.find(g=>g.id===b.dataset.relink)));
+  $$('button[data-relink]',wrap).forEach(b=>b.onclick=()=>relinkItems(GAME_SOURCES.find(g=>g.id===b.dataset.relink)));
 }
 
 function quickWikiImport(src){
@@ -603,30 +629,93 @@ function quickWikiImport(src){
 $('#embedimgs').onchange=()=>{ if($('#embedimgs').checked) $('#localimgs').checked=false; };
 $('#localimgs').onchange=()=>{ if($('#localimgs').checked) $('#embedimgs').checked=false; };
 
-/** Swap the current board's item images for the wiki's, matching by name with
- * punctuation/spacing stripped (TierMaker's "Ashenstrike" == wiki's "Ashen
- * Strike"). Only touches img/src on a match; unmatched items keep whatever
- * they had, and nothing about tags, notes or placement changes. */
-async function relinkFromWiki(src){
+/** Inventory the board and local image cache before consulting the wiki. Items
+ * already linked locally are retained; other local files and wiki entries are
+ * matched by punctuation-insensitive name. Only relevant missing wiki images
+ * are downloaded. Tags, notes, names and placements stay put. */
+async function relinkItems(src){
   if(helperBase===null) helperBase=await findHelper();
   if(!helperBase) return toast('Needs the local runtime—run TierForge.cmd, then reload.');
   $('#log').textContent='';
-  toast('Relinking items from local cache/wiki…');
-  let pack;
-  try{ pack=await importViaHelper(helperBase,src.wiki,false,log,true,true); }
-  catch(e){ return toast('Could not fetch the wiki: '+e.message); }
-  const byName={};
-  (Array.isArray(pack.items)?pack.items:Object.values(pack.items)).forEach(it=>{ byName[normName(it.name)]=it; });
+  const items=Object.values(S.items);
+  if(!items.length) return toast('There are no items to relink.');
+  toast(`Scanning ${items.length} board item(s)…`);
+  const localByName={};
+  const localFiles=new Set();
+  try{
+    const r=await fetch(helperBase+'/images');
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    const files=(await r.json()).images||[];
+    files.forEach(file=>{
+      file=String(file).replace(/^\/+/, '');
+      localFiles.add(file);
+      const stem=file.split('/').pop().replace(/\.[^.]+$/,'');
+      const candidates=[stem,stem.replace(/^[^_]+_/,'')];
+      candidates.forEach(name=>{ if(name&&!localByName[normName(name)]) localByName[normName(name)]=file; });
+    });
+    log(`Scanned ${files.length} locally saved image file(s).`);
+  }catch(e){ log('Could not scan local images: '+e.message); }
+  const alreadyLocal=[]; const localMatches=[]; const unresolved=[];
   snapshot();
-  let matched=0; const missed=[];
-  Object.values(S.items).forEach(it=>{
-    const w=byName[normName(it.name)];
-    if(w){ it.img=w.img||w.src||it.img; it.src=w.src||w.img||it.src; matched++; }
-    else missed.push(it.name);
+  items.forEach(it=>{
+    const current=String(it.img||'').replace(/^\/+/, '');
+    if(localFiles.has(current)){ alreadyLocal.push(it); return; }
+    const local=localByName[normName(it.name)];
+    if(local){ it.img=local; localMatches.push(it); }
+    else unresolved.push(it);
   });
+  log(`${alreadyLocal.length} item(s) already point to saved files; ${localMatches.length} more matched the local cache.`);
+
+  let wikiMatches=[]; let missed=[...unresolved];
+  if(unresolved.length && src){
+    log(`Checking ${unresolved.length} remaining item(s) against ${src.name} wiki metadata…`);
+    try{
+      const catalog=await importViaHelper(helperBase,src.wiki,false,log);
+      const wikiByName={};
+      (Array.isArray(catalog.items)?catalog.items:Object.values(catalog.items))
+        .forEach(it=>{ wikiByName[normName(it.name)]=it; });
+      wikiMatches=unresolved.filter(it=>wikiByName[normName(it.name)]);
+      missed=unresolved.filter(it=>!wikiByName[normName(it.name)]);
+      log(`${wikiMatches.length} item(s) are from the wiki; ${missed.length} are local/custom or unrecognized.`);
+      if(wikiMatches.length){
+        log(`Saving only those ${wikiMatches.length} wiki image(s)…`);
+        const pack=await importViaHelper(helperBase,src.wiki,false,log,true,true,
+          wikiMatches.map(it=>it.name));
+        const savedByName={};
+        (Array.isArray(pack.items)?pack.items:Object.values(pack.items))
+          .filter(it=>/^\/?Images\//i.test(it.img||''))
+          .forEach(it=>{ savedByName[normName(it.name)]=it; });
+        const saved=[]; const failed=[];
+        wikiMatches.forEach(it=>{
+          const w=savedByName[normName(it.name)];
+          if(w){ it.img=w.img; it.src=w.src||w.img||it.src; saved.push(it); }
+          else failed.push(it);
+        });
+        wikiMatches=saved; missed.push(...failed);
+        if(failed.length) log(`${failed.length} matched wiki image(s) could not be saved and were left unchanged.`);
+      }
+    }catch(e){
+      log('Wiki lookup unavailable: '+e.message);
+      wikiMatches=[]; missed=[...unresolved];
+    }
+  }
   persist(); render();
-  toast(`Relinked ${matched} item(s) using local files/wiki`+(missed.length?`, ${missed.length} not found (kept as-is)`:''));
-  if(missed.length) log('Not found on the wiki, left unchanged: '+missed.join(', '));
+  const relinked=localMatches.length+wikiMatches.length;
+  toast(`Relinked ${relinked} item(s); ${alreadyLocal.length} already local`+
+    (missed.length?`; ${missed.length} left unchanged`:''));
+  if(missed.length) log('Left unchanged (local/custom or not on this wiki): '+missed.map(it=>it.name).join(', '));
+}
+
+/* Imported lists often point at fresh remote URLs even though the same images
+ * are already cached locally. Reuse the normal relinker after an import so a
+ * refresh does not turn a board back into a remote-only board. The wiki lookup
+ * is only attempted when the board identifies a supported game; local cache
+ * matching works for every imported list. */
+async function autoRelinkImportedItems(){
+  if(!$('#autorelink')?.checked || !Object.keys(S.items).length) return;
+  const source=detectGameSource(S);
+  log('Auto-relinking imported items to saved images…');
+  await relinkItems(source);
 }
 
 $('#btnFetch').onclick=async()=>{
@@ -643,7 +732,7 @@ $('#btnFetch').onclick=async()=>{
       if($('#mergeimp').checked){ snapshot(); const added=mergeItemsIntoPool(pack);
         log(`Merged ${added} new card(s) into the pool (${pack.items.length-added} already present).`); }
       else { S=normalize(pack); log(`Imported ${pack.items.length} cards.`); }
-      sel.clear(); persist(); render();
+      sel.clear(); persist(); render(); await autoRelinkImportedItems();
       return toast('Imported '+pack.items.length+' cards');
     }
 
@@ -663,7 +752,7 @@ $('#btnFetch').onclick=async()=>{
     if(helperBase){
       log('Using local runtime at '+helperBase+' …');
       const pack=await importViaHelper(helperBase,url,$('#embedimgs').checked,log,$('#localimgs').checked);
-      S=normalize(pack); sel.clear(); persist(); render();
+      S=normalize(pack); sel.clear(); persist(); render(); await autoRelinkImportedItems();
       log(`Imported ${pack.items.length} items into ${pack.tiers.length} tiers.`);
       return toast('Imported '+pack.items.length+' items');
     }
@@ -698,6 +787,7 @@ $('#btnFetch').onclick=async()=>{
     buildFrom(chars,tc,$('#mergeimp').checked,{url,title});
     log(`Imported ${chars.length} items into ${S.tiers.length} tiers.`);
     if($('#embedimgs').checked) await embedAll(log);
+    await autoRelinkImportedItems();
     toast('Imported '+chars.length+' items');
   }catch(err){
     log('ERROR: '+err.message);
@@ -739,10 +829,11 @@ $('#btnParsePaste').onclick=()=>{
    list is right there in the DOM. It also picks up any rearranging you have done
    by hand. templateCode and that localStorage key are read as fallbacks, and the
    item catalogue comes from templates-v2. */
-$('#bmk').setAttribute('href','javascript:'+[
+const bookmarklet='javascript:'+[
 "(function(){var L=location.href,H=document.documentElement.innerHTML,",
 "TC=(H.match(/templateCode\\s*=\\s*\"([^\"]+)\"/)||[])[1]||'',",
-"T=TC?TC.split('==')[0]:((L.match(/\\/(?:create|list)\\/(?:[^\\/]+\\/)?([^\\/?#]+)/)||[])[1]||''),",
+"P=location.pathname.split('/').filter(Boolean),X=P.indexOf('create'),Y=P.indexOf('list'),",
+"T=TC?TC.split('==')[0]:(X>=0?(P[X+1]||''):(Y>=0?(P[Y+2]||P[Y+1]||''):'')),",
 "LS='';try{LS=localStorage.getItem(T+'TierListMakerCode')||''}catch(e){}",
 "R=function(){return [].map.call(document.querySelectorAll('.tier-row'),function(r){",
 "var h=r.querySelector('.label-holder'),l=r.querySelector('.label');",
@@ -752,19 +843,32 @@ $('#bmk').setAttribute('href','javascript:'+[
 "D=function(){return [].map.call(document.querySelectorAll('.character'),function(e,n){",
 "var m=(e.getAttribute('style')||'').match(/url\\(['\"]?(.*?)['\"]?\\)/),i=e.querySelector('img');",
 "return{key:e.id||String(n+1),src:m?m[1]:(i?i.src:''),name:e.title||(i?i.alt:'')||''}}).filter(function(x){return x.src})},",
-"F=function(c){var rows=R();var o=JSON.stringify({tierforge:1,title:document.title,url:L,",
+"F=function(c){var rows=R(),o=JSON.stringify({tierforge:1,title:document.title,url:L,",
 "chars:c,rows:rows,templateCode:TC||LS});",
 "var msg='TierForge: copied '+c.length+' items'+(rows.length?' and '+rows.length+' tiers':'')+'. Paste it into the Grab tab.';",
-"navigator.clipboard.writeText(o).then(function(){alert(msg)},",
-"function(){var w=window.open();w.document.write('<textarea style=\"width:99%;height:90vh\">'+o+'</textarea>')})};",
+"var q=function(){prompt('TierForge: clipboard access was denied. Copy this payload, then paste it into the Grab tab:',o)};",
+"if(navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(o).then(function(){alert(msg)},q);else q()};",
 "fetch('/create/'+T).then(function(r){return r.text()}).then(function(h){",
 "var v=(h.match(/initList\\(\\s*\"[^\"]*\"\\s*,\\s*\"[^\"]*\"\\s*,\\s*\"([^\"]*)\"/)||[])[1]||'',",
-"d=(h.match(/dateLastEdited\\s*=\\s*\"([^\"]*)\"/)||[])[1]||'';",
+"d=(h.match(/dateLastEdited\\s*=\\s*\"([^\"]*)\"/)||[])[1]||'',",
+"b=(h.match(/baseTierImagePath\\s*=\\s*\"([^\"]*)\"/)||[])[1]||'';",
 "return fetch('/api/?type=templates-v2&id='+encodeURIComponent(T)+'&lastEdited='+encodeURIComponent(d)+'&variation='+encodeURIComponent(v))",
 ".then(function(r){return r.json()}).then(function(j){return j.slice(1).map(function(e,n){",
-"return{key:String((e&&e.id)||n+1),src:(e&&e.src)||'',name:''}}).filter(function(x){return x.src})})})",
+"var s=typeof e==='string'?(b.replace(/\\/$/,'')+'/'+e):((e&&e.src)||'');",
+"return{key:String((e&&e.id)||n+1),src:s,name:''}}).filter(function(x){return x.src})})})",
 ".then(function(c){F(c.length?c:D())},function(){var c=D();c.length?F(c):alert('TierForge: nothing found on this page')})})()"
-].join(''));
+].join('');
+$('#bmk').setAttribute('href',bookmarklet);
+async function copyBookmarklet(e){
+  e?.preventDefault();
+  try{ await navigator.clipboard.writeText(bookmarklet); toast('Bookmark code copied'); }
+  catch(err){
+    const code=prompt('Copy this code into a new bookmark\'s URL field:',bookmarklet);
+    if(code!==null) toast('Copy the shown code into a bookmark URL');
+  }
+}
+$('#bmk').onclick=copyBookmarklet;
+$('#copyBmk').onclick=copyBookmarklet;
 
 /* JSON in ------------------------------------------------------- */
 $('#btnParseJson').onclick=()=>loadJSON($('#pastejson').value,false);
@@ -800,6 +904,7 @@ function loadJSON(text,quiet){
 function normalize(o){
   const st=blankState(); st.title=o.title||st.title; st.source=o.source||'';
   if(o.opts)Object.assign(st.opts,o.opts);
+  delete st.opts.size;
   st.items={}; const map={};
   const arr=Array.isArray(o.items)?o.items:Object.values(o.items);
   arr.forEach(it=>{ const id=it.id||uid();
@@ -920,19 +1025,19 @@ async function embedAll(report=()=>{}){
 
 $('#expPng').onclick=async()=>{
   const el=$('#explog'); el.textContent='Loading images…';
-  const S_=S, size=Math.max(48,S_.opts.size), pad=3, labelw=Math.max(120,size*1.6);
-  const perRow=Math.max(4,Math.round(1400/(size+pad)));
+  const S_=S, tileSize=TILE_SIZE, pad=3, labelw=Math.max(120,tileSize*1.6);
+  const perRow=Math.max(4,Math.round(1400/(tileSize+pad)));
   const cvs=document.createElement('canvas'), ctx=cvs.getContext('2d');
   const rows=S_.tiers.map(t=>({...t,lines:Math.max(1,Math.ceil(t.items.length/perRow))}));
-  const width=labelw+perRow*(size+pad)+pad;
-  const height=rows.reduce((a,r)=>a+r.lines*(size+pad)+pad,0)+40;
+  const width=labelw+perRow*(tileSize+pad)+pad;
+  const height=rows.reduce((a,r)=>a+r.lines*(tileSize+pad)+pad,0)+40;
   cvs.width=width; cvs.height=height;
   ctx.fillStyle='#0f1115'; ctx.fillRect(0,0,width,height);
   ctx.font='bold 20px Segoe UI,sans-serif'; ctx.fillStyle='#e7eaf0'; ctx.textBaseline='middle';
   ctx.fillText(S_.title,10,20);
   const cache=new Map(); let y=40, failed=0;
   for(const r of rows){
-    const h=r.lines*(size+pad)+pad;
+    const h=r.lines*(tileSize+pad)+pad;
     ctx.fillStyle=r.color; ctx.fillRect(0,y,labelw,h);
     ctx.fillStyle='#111'; ctx.font='bold 18px Segoe UI,sans-serif';
     ctx.textAlign='center';
@@ -940,15 +1045,15 @@ $('#expPng').onclick=async()=>{
     ctx.textAlign='left';
     for(let k=0;k<r.items.length;k++){
       const it=S_.items[r.items[k]]; if(!it)continue;
-      const x=labelw+pad+(k%perRow)*(size+pad), yy=y+pad+Math.floor(k/perRow)*(size+pad);
-      ctx.fillStyle='#000'; ctx.fillRect(x,yy,size,size);
+      const x=labelw+pad+(k%perRow)*(tileSize+pad), yy=y+pad+Math.floor(k/perRow)*(tileSize+pad);
+      ctx.fillStyle='#000'; ctx.fillRect(x,yy,tileSize,tileSize);
       if(it.img){ if(!cache.has(it.img))cache.set(it.img,await loadForCanvas(it.img));
         const img=cache.get(it.img);
-        if(img){ const s=Math.min(size/img.width,size/img.height);
-          ctx.drawImage(img,x+(size-img.width*s)/2,yy+(size-img.height*s)/2,img.width*s,img.height*s); }
+        if(img){ const s=Math.min(tileSize/img.width,tileSize/img.height);
+          ctx.drawImage(img,x+(tileSize-img.width*s)/2,yy+(tileSize-img.height*s)/2,img.width*s,img.height*s); }
         else failed++; }
       if(!it.img||!cache.get(it.img)){ ctx.fillStyle='#e7eaf0'; ctx.font='11px Segoe UI,sans-serif';
-        ctx.textAlign='center'; wrapText(ctx,it.name,x+size/2,yy+size/2,size-6,12); ctx.textAlign='left'; }
+        ctx.textAlign='center'; wrapText(ctx,it.name,x+tileSize/2,yy+tileSize/2,tileSize-6,12); ctx.textAlign='left'; }
       el.textContent='Drawing…';
     }
     y+=h;
@@ -976,7 +1081,10 @@ function wrapText(ctx,text,x,y,maxw,lh){
     catch(e){}
   }
   if(!S||!S.tiers)S=blankState();
-  S.opts=Object.assign({size:96,labels:'find'},S.opts||{});
+  const hadSize=Object.prototype.hasOwnProperty.call(S.opts||{},'size');
+  S.opts=Object.assign({labels:'find'},S.opts||{});
+  delete S.opts.size;
+  if(hadSize)persist();
   render();
   if(!helperBase) warnNoHelper();
 })();

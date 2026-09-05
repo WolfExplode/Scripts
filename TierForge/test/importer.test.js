@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { originalWikiImageUrl, parseCharacters, parseTemplateCode, parseWikiCards, prettyName } from '../src/importer.js';
+import { originalWikiImageUrl, parseCharacters, parseTemplateCode, parseWikiCards, prettyName,
+  selectNamedItems } from '../src/importer.js';
 
 test('prettyName derives a readable item name', () => {
   assert.equal(prettyName('ashenStrike_card.png'), 'Ashen Strike Card');
@@ -30,4 +31,11 @@ test('parseWikiCards extracts searchable metadata', () => {
   assert.equal(card.src, 'https://slaythespire.wiki.gg/images/Test.png');
   assert.deepEqual(card.tags, ['Ironclad', 'Rare', 'Attack', 'Strike', 'Fire']);
   assert.equal(card.notes, 'Cost 2. Deal 12 damage.');
+});
+
+test('named item selection is punctuation-insensitive and optional', () => {
+  const items = [{ name: 'Ashen Strike' }, { name: 'All For One' }, { name: 'Pomander' }];
+  assert.deepEqual(selectNamedItems(items, ['ashen-strike', 'All_for_One']), items.slice(0, 2));
+  assert.equal(selectNamedItems(items), items);
+  assert.deepEqual(selectNamedItems(items, []), []);
 });

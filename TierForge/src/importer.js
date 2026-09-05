@@ -233,6 +233,16 @@ export function parseWikiCards(page) {
   return cards;
 }
 
+const normalizedItemName = value => String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+
+/** Keep only source items requested by the board. Relinking uses this after it
+ * has inspected the board and local cache, avoiding an entire catalog download. */
+export function selectNamedItems(items, names) {
+  if (!Array.isArray(names)) return items;
+  const wanted = new Set(names.map(normalizedItemName).filter(Boolean));
+  return items.filter(item => wanted.has(normalizedItemName(item.name)));
+}
+
 function extensionFor(url) {
   const extension = path.extname(new URL(url).pathname).toLowerCase();
   return /^\.[a-z0-9]{1,5}$/.test(extension) ? extension : '.png';
@@ -308,9 +318,12 @@ export async function importSource(url, options = {}) {
   if (/slaythespire\.wiki\.gg/i.test(source)) {
     log('Reading wiki page...');
     const page = await fetchPage(source, log);
-    const cards = parseWikiCards(page);
-    if (!cards.length) throw new Error('no cards found - the wiki layout may have changed');
-    log(`Found ${cards.length} cards`);
+    const wikiCards = parseWikiCards(page);
+    if (!wikiCards.length) throw new Error('no cards found - the wiki layout may have changed');
+    const cards = selectNamedItems(wikiCards, options.names);
+    log(Array.isArray(options.names)
+      ? `Found ${wikiCards.length} wiki cards; ${cards.length} match the current board`
+      : `Found ${cards.length} cards`);
     await materializeImages(cards, mode, {
       directory: path.join(options.root, 'Images', 'sts2'), linkPrefix: 'Images/sts2',
       onlyMissing: options.onlyMissing,

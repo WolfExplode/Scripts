@@ -72,6 +72,26 @@ async function listBoards(response) {
   json(response, 200, { boards });
 }
 
+async function collectImages(directory, prefix = '') {
+  let entries;
+  try { entries = await readdir(directory, { withFileTypes: true }); }
+  catch (error) { if (error.code === 'ENOENT') return []; throw error; }
+  const images = [];
+  for (const entry of entries) {
+    const relative = path.join(prefix, entry.name);
+    if (entry.isDirectory()) images.push(...await collectImages(path.join(directory, entry.name), relative));
+    else if (mimeTypes.has(path.extname(entry.name).toLowerCase()) &&
+             mimeTypes.get(path.extname(entry.name).toLowerCase()).startsWith('image/')) images.push(relative);
+  }
+  return images;
+}
+
+async function listImages(response) {
+  const files = (await collectImages(path.join(root, 'Images')))
+    .map(file => `Images/${file.split(path.sep).join('/')}`);
+  json(response, 200, { images: files });
+}
+
 function boardPath(rawName) {
   const name = safeBoardName(rawName);
   if (!name) throw Object.assign(new Error('bad board name'), { status: 400 });
@@ -107,6 +127,35 @@ async function deleteBoard(rawName, response) {
   json(response, 200, { ok: true });
 }
 
+async function renameBoard(rawName, request, response) {
+  const source = boardPath(rawName);
+  let input;
+  try { input = JSON.parse((await readBody(request, 1024 * 1024)).toString('utf8') || '{}'); }
+  catch (error) { return json(response, 400, { error: `invalid JSON: ${error.message}` }); }
+  if (typeof input.name !== 'string' || !input.name.trim()) {
+    return json(response, 400, { error: 'name must be a non-empty string' });
+  }
+
+  const nextName = safeBoardName(encodeURIComponent(input.name));
+  if (!nextName) return json(response, 400, { error: 'bad board name' });
+  const target = boardPath(encodeURIComponent(nextName));
+  if (source === target) return json(response, 200, { ok: true, name: nextName });
+
+  try { await access(source); }
+  catch (error) { if (error.code === 'ENOENT') return json(response, 404, { error: 'not found' }); throw error; }
+  try { await access(target); return json(response, 409, { error: 'a board with that name already exists' }); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
+
+  const body = await readFile(source);
+  let board;
+  try { board = JSON.parse(body.toString('utf8')); }
+  catch (error) { return json(response, 500, { error: `saved board is invalid JSON: ${error.message}` }); }
+  board.title = nextName;
+  await writeFile(target, JSON.stringify(board));
+  await unlink(source);
+  json(response, 200, { ok: true, name: nextName });
+}
+
 function importOptions(url) {
   return {
     root,
@@ -128,13 +177,24 @@ async function synchronousImport(url, response) {
   json(response, 200, result);
 }
 
-function startImport(url, response) {
+async function startImport(request, url, response) {
   const source = url.searchParams.get('url');
   if (!source) return json(response, 400, { error: 'missing url' });
+  let names;
+  if (request.method === 'POST') {
+    let input;
+    try { input = JSON.parse((await readBody(request, 1024 * 1024)).toString('utf8') || '{}'); }
+    catch (error) { return json(response, 400, { error: `invalid JSON: ${error.message}` }); }
+    if (input.names !== undefined && (!Array.isArray(input.names) ||
+        input.names.some(name => typeof name !== 'string'))) {
+      return json(response, 400, { error: 'names must be an array of strings' });
+    }
+    names = input.names;
+  }
   const id = randomUUID().replaceAll('-', '').slice(0, 12);
   const job = { lines: [`Import: ${source}`], done: false, result: null, error: null, touched: Date.now() };
   jobs.set(id, job);
-  importSource(source, { ...importOptions(url), log: message => job.lines.push(message) })
+  importSource(source, { ...importOptions(url), names, log: message => job.lines.push(message) })
     .then(result => { job.result = result; job.done = true; job.touched = Date.now(); })
     .catch(error => { job.error = error.message; job.done = true; job.touched = Date.now(); });
   json(response, 200, { job: id });
@@ -175,19 +235,25 @@ async function route(request, response) {
   const pathname = url.pathname.replace(/\/$/, '') || '/';
   if (request.method === 'OPTIONS') {
     response.writeHead(204, { 'access-control-allow-origin': '*',
-      'access-control-allow-headers': '*', 'access-control-allow-methods': 'GET, PUT, DELETE, OPTIONS' });
+      'access-control-allow-headers': '*', 'access-control-allow-methods': 'GET, POST, PUT, DELETE, OPTIONS' });
     return response.end();
   }
   if (request.method === 'GET' && pathname === '/health') return json(response, 200, { ok: true, runtime: 'node' });
+  if (request.method === 'GET' && pathname === '/images') return listImages(response);
   if (request.method === 'GET' && pathname === '/boards') return listBoards(response);
   if (pathname.startsWith('/boards/')) {
     const name = pathname.slice('/boards/'.length);
     if (request.method === 'GET') return getBoard(name, response);
     if (request.method === 'PUT') return putBoard(name, request, response);
+    if (request.method === 'POST' && name.endsWith('/rename')) {
+      return renameBoard(name.slice(0, -'/rename'.length), request, response);
+    }
     if (request.method === 'DELETE') return deleteBoard(name, response);
   }
   if (request.method === 'GET' && ['/import', '/api/import'].includes(pathname)) return synchronousImport(url, response);
-  if (request.method === 'GET' && pathname === '/import/start') return startImport(url, response);
+  if (['GET', 'POST'].includes(request.method) && pathname === '/import/start') {
+    return startImport(request, url, response);
+  }
   if (request.method === 'GET' && pathname === '/import/poll') return pollImport(url, response);
   if (request.method === 'GET' || request.method === 'HEAD') return staticFile(url.pathname, response);
   json(response, 404, { error: 'not found' });

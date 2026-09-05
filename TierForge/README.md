@@ -33,12 +33,15 @@ Open **Import**, paste a TierMaker `/list/` or `/create/` URL, and select how im
 - **Embedded**: put base64 image data inside the Board. Portable, but produces large JSON files.
 
 The **Slay the Spire 2: import all cards** shortcut reads the wiki's Cards List and defaults to
-local files. **Merge into current board** adds only new entries. **Relink items** matches names
-without changing tiers, tags, or notes, reusing any matching local image and downloading only a
-missing image from the wiki.
+local files. **Merge into current board** adds only new entries. **Relink items** inventories the
+current board and `Images/` first, keeps items that are already saved locally, then checks only the
+unresolved names against the wiki. It preserves tiers, tags, and notes and downloads only matching
+wiki images that are still missing.
 
 TierMaker remix links keep placements in that site's browser storage rather than in the URL. Use
-the bookmarklet under **Import → Grab from page** when a remix cannot be read directly.
+the bookmarklet under **Import → Grab from page** when a remix cannot be read directly. Drag the
+bookmarklet link to the bookmarks bar, or use **Copy bookmark code** and paste it into a new
+bookmark's URL field. Run it on the loaded TierMaker page, then paste its output back into TierForge.
 
 ## Everyday controls
 
