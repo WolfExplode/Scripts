@@ -47,6 +47,7 @@ bookmark's URL field. Run it on the loaded TierMaker page, then paste its output
 
 - Click tiles to select; Shift-click selects a range.
 - Drag one selected tile to move the full selection.
+- Hold `Ctrl` while dropping before another item to make the same relative move on every sub-board.
 - Press `1`–`9` to move selected items to a tier, or `0` for the pool.
 - Press `/` to search, `Ctrl+A` to select matches, `Delete` to remove, and `Ctrl+Z` to undo.
 - Double-click a tile to edit its name, image, tags, and notes.

@@ -1,3 +1,5 @@
+@import url('https://fonts.googleapis.com/css2?family=Fredoka:wght@500;600;700&display=swap');
+
 :root{
   --bg:#14161a; --panel:#1c1f26; --panel2:#232733; --line:#333a48;
   --fg:#e7eaf0; --dim:#98a1b3; --accent:#6ea8ff; --accent2:#ffcc66;
@@ -42,9 +44,13 @@ header{display:flex;flex-direction:column;gap:6px;padding:8px 10px;background:va
 #qcount{min-width:70px;font-variant-numeric:tabular-nums}
 #subboardTabs{display:flex;align-items:center;gap:8px;flex:1 1 520px;min-width:0;overflow-x:auto;
   scrollbar-width:thin;padding:1px 0}
-.subboard-tab{width:210px;min-width:150px;height:32px;display:flex;align-items:center;gap:3px;
-  padding:2px 3px 2px 10px;overflow:hidden;background:transparent;border:1px solid var(--line);border-radius:6px}
+.subboard-tab{width:210px;min-width:150px;height:32px;position:relative;display:flex;align-items:center;gap:3px;
+  padding:2px 3px 2px 10px;overflow:visible;background:transparent;border:1px solid var(--line);border-radius:6px}
 .subboard-tab.active{background:#1d304d;border-color:var(--accent);box-shadow:inset 0 0 0 1px rgba(110,168,255,.18)}
+.subboard-tab[draggable="true"]{cursor:grab}
+.subboard-tab[draggable="true"]:active{cursor:grabbing}
+.subboard-tab.compare-drop-over{border-color:var(--accent2);box-shadow:0 0 0 2px rgba(255,204,102,.24);background:#2a2930}
+.subboard-tab.comparing{margin-bottom:24px}
 .subboard-tab input{width:100%;min-width:0;border:0;background:transparent;padding:0;outline:none}
 .subboard-name{min-width:0;flex:1;padding:2px 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
   text-align:left;background:transparent;border:0}
@@ -54,6 +60,10 @@ header{display:flex;flex-direction:column;gap:6px;padding:8px 10px;background:va
 .subboard-delete:hover,.subboard-delete[data-confirm="1"]{background:transparent;color:var(--danger)}
 .subboard-delete .icon{width:14px;height:14px}
 .subboard-add{flex:none;color:var(--accent);border-style:dashed}
+.subboard-compare{position:absolute;z-index:2;top:calc(100% + 1px);left:-1px;width:calc(100% + 2px);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:3px 10px;text-align:left;font-size:12px;
+  color:var(--fg);background:#171d28;border:1px solid var(--line);border-top:0;border-radius:0 0 7px 7px}
+.subboard-compare:hover{background:#252d3c;color:var(--accent2)}
 button.icon-button{display:grid;place-items:center;width:30px;height:30px;padding:0}
 button.icon-button .icon{width:16px;height:16px}
 #settingsWrap{position:relative}
@@ -94,7 +104,7 @@ main.panning{cursor:grabbing}
 .tools button.icon-button:active{transform:translateY(0);box-shadow:none}
 .tools button.icon-button.danger:hover{background:rgba(130,35,45,.8);border-color:#ff9a9a;color:#fff}
 .tools button.icon-button:focus-visible{outline:2px solid #fff;outline-offset:1px}
-.drop{flex:1;display:flex;flex-wrap:wrap;align-content:flex-start;gap:2px;padding:3px;
+.drop{flex:1;display:flex;flex-wrap:wrap;align-content:flex-start;gap:2px;padding:3px;overflow:visible;
   background:#0f1115;min-height:104px}
 .drop.over{background:#172239;outline:2px solid color-mix(in srgb,var(--accent) 72%,transparent);
   outline-offset:-2px;box-shadow:inset 0 0 28px rgba(110,168,255,.09)}
@@ -109,6 +119,7 @@ main.panning{cursor:grabbing}
 .item{position:relative;width:96px;height:96px;flex:none;cursor:grab;
   background:#000;border-radius:4px;overflow:hidden;user-select:none;
   border:2px solid transparent}
+.item.compared{overflow:visible;z-index:20}
 .item img{width:100%;height:100%;object-fit:contain;display:block;pointer-events:none}
 .item.sel{border-color:var(--accent2);box-shadow:0 0 0 2px rgba(255,204,102,.35)}
 .item.dim{opacity:.18;filter:grayscale(1)}
@@ -138,6 +149,28 @@ main.panning{cursor:grabbing}
 .item .badge{position:absolute;top:0;right:0;background:rgba(0,0,0,.65);font-size:10px;
   padding:0 3px;border-bottom-left-radius:4px;color:var(--accent2);display:none}
 .item.hasnote .badge{display:block}
+.rank-shift{position:absolute;z-index:40;display:flex;align-items:center;gap:0;white-space:nowrap;
+  font:700 11px/1 "Fredoka","Arial Rounded MT Bold","Comic Sans MS","Segoe UI",sans-serif;font-variant-numeric:tabular-nums;
+  pointer-events:none;filter:drop-shadow(0 1px 1px #000) drop-shadow(0 0 1px #000)}
+.rank-shift b{font:inherit;font-size:8px;letter-spacing:-.35px;position:relative;z-index:1}
+.rank-shift.horizontal b{margin-left:-4px}
+.movement-arrow{width:15px;height:15px;flex:none;fill:none;stroke:currentColor;stroke-width:8;
+  stroke-linecap:round;stroke-linejoin:round}
+.movement-arrow.up{transform:none}
+.movement-arrow.right{transform:rotate(90deg)}
+.movement-arrow.down{transform:rotate(180deg)}
+.movement-arrow.left{transform:rotate(-90deg)}
+.rank-shift.up{color:#58ee34}
+.rank-shift.down{color:#ef5665}
+.rank-shift.left{color:#58ee34}
+.rank-shift.right{color:#ef5665}
+.rank-shift.vertical{left:50%;transform:translateX(-50%)}
+.rank-shift.vertical.up{bottom:calc(100% - 2px)}
+.rank-shift.vertical.down{top:calc(100% - 2px)}
+.rank-shift.horizontal{top:50%;transform:translateY(-50%);display:none}
+.item.sel .rank-shift.horizontal{display:flex}
+.rank-shift.horizontal.left{right:calc(100% - 7px)}
+.rank-shift.horizontal.right{left:calc(100% - 7px)}
 
 /* caption: ALWAYS in the DOM so browser Ctrl+F can find + scroll to it.
    opacity:0 keeps native find working (display:none / visibility:hidden would not). */

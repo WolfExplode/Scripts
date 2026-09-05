@@ -3,6 +3,7 @@ const $=(s,r=document)=>r.querySelector(s), $$=(s,r=document)=>[...r.querySelect
 const uid=()=>Math.random().toString(36).slice(2,10);
 const TILE_SIZE=96;
 const icon=name=>`<svg class="icon" aria-hidden="true" focusable="false"><use href="#icon-${name}"></use></svg>`;
+const movementArrow=direction=>`<svg class="movement-arrow ${direction}" viewBox="0 0 48 48" aria-hidden="true" focusable="false"><path d="M5 31 24 17l19 14"/></svg>`;
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
 /* TierMaker's stock row palette, indexed by the colour number in templateCode */
@@ -10,7 +11,8 @@ const TM_COLORS=['#ff7f7f','#ffbf7f','#ffdf7f','#ffff7f','#bfff7f','#7fff7f','#7
 const DEFAULT_TIERS=[['S','#ff7f7f'],['A','#ffbf7f'],['B','#ffdf7f'],['C','#ffff7f'],['D','#bfff7f'],['F','#7fff7f']];
 
 /* ============================ STATE ============================ */
-let S=null, sel=new Set(), lastClicked=null, undoStack=[];
+let S=null, sel=new Set(), lastClicked=null, undoStack=[], compareSubBoardId=null, comparisonState=null,
+  draggedSubBoardId=null;
 
 function blankState(){
   return {v:1,title:'Untitled Tier List',source:'',
@@ -39,14 +41,21 @@ function ensureSubBoards(){
     S.subBoards=[{id:uid(),name:'Main',layout:layoutFromState()}];
   }
   S.subBoards=S.subBoards.map((sub,i)=>({
-    id:sub.id||uid(),name:String(sub.name||`Alternative ${i+1}`),layout:sub.layout||layoutFromState()
+    id:sub.id||uid(),name:String(sub.name||`Alternative ${i+1}`),layout:sub.layout||layoutFromState(),
+    compareSubBoardId:sub.compareSubBoardId||null
   }));
+  S.subBoards.forEach(sub=>{
+    if(sub.compareSubBoardId===sub.id||!S.subBoards.some(other=>other.id===sub.compareSubBoardId)){
+      sub.compareSubBoardId=null;
+    }
+  });
   if(!S.subBoards.some(sub=>sub.id===S.activeSubBoardId))S.activeSubBoardId=S.subBoards[0].id;
 }
 function prepareState(){
   if(!S||!S.tiers)S=blankState();
   S.opts=Object.assign({labels:'find'},S.opts||{}); delete S.opts.size;
-  ensureSubBoards(); applySubBoardLayout(activeSubBoard().layout);
+  ensureSubBoards(); compareSubBoardId=activeSubBoard().compareSubBoardId||null;
+  applySubBoardLayout(activeSubBoard().layout);
 }
 function applyTitleWidth(){
   const width=Number(S.opts?.titleWidth);
@@ -55,9 +64,12 @@ function applyTitleWidth(){
 }
 function renderSubBoards(){
   const tabs=$('#subboardTabs'); if(!tabs)return;
+  compareSubBoardId=activeSubBoard().compareSubBoardId||null;
   tabs.replaceChildren(...S.subBoards.map(sub=>{
     const tab=document.createElement('div');
-    tab.className='subboard-tab'+(sub.id===S.activeSubBoardId?' active':'');
+    const isCompared=sub.id===S.activeSubBoardId&&compareSubBoardId;
+    tab.className='subboard-tab'+(sub.id===S.activeSubBoardId?' active':'')+(isCompared?' comparing':'');
+    tab.draggable=true; tab.dataset.subboardDrop=sub.id;
     const name=document.createElement('button');
     name.className='subboard-name'; name.dataset.subboard=sub.id; name.setAttribute('role','tab');
     name.setAttribute('aria-selected',String(sub.id===S.activeSubBoardId));
@@ -66,11 +78,67 @@ function renderSubBoards(){
     remove.className='subboard-delete'; remove.dataset.deleteSubboard=sub.id;
     remove.title='Delete sub-board'; remove.setAttribute('aria-label',`Delete ${sub.name}`); remove.textContent='×';
     tab.append(name,remove);
+    if(isCompared){
+      const other=S.subBoards.find(item=>item.id===compareSubBoardId);
+      const chip=document.createElement('button');
+      chip.className='subboard-compare'; chip.dataset.clearComparison='1'; chip.type='button';
+      chip.title='Click to stop comparing'; chip.setAttribute('aria-label',`Stop comparing with ${other.name}`);
+      chip.textContent=other.name; tab.appendChild(chip);
+    }
+    tab.addEventListener('dragstart',e=>{
+      draggedSubBoardId=sub.id;
+      e.dataTransfer.effectAllowed='link'; e.dataTransfer.setData('text/plain',sub.id);
+      tab.classList.add('dragging-tab');
+    });
+    tab.addEventListener('dragend',()=>{ draggedSubBoardId=null;
+      $$('.compare-drop-over,.dragging-tab',tabs).forEach(node=>node.classList.remove('compare-drop-over','dragging-tab'));
+    });
+    tab.addEventListener('dragover',e=>{
+      const source=draggedSubBoardId||e.dataTransfer.getData('text/plain');
+      if(source&&source!==sub.id){ e.preventDefault(); e.dataTransfer.dropEffect='link'; tab.classList.add('compare-drop-over'); }
+    });
+    tab.addEventListener('dragleave',e=>{ if(!tab.contains(e.relatedTarget))tab.classList.remove('compare-drop-over'); });
+    tab.addEventListener('drop',e=>{
+      e.preventDefault(); tab.classList.remove('compare-drop-over');
+      const source=draggedSubBoardId||e.dataTransfer.getData('text/plain');
+      if(source&&source!==sub.id)compareSubBoards(sub.id,source);
+    });
     return tab;
   }),Object.assign(document.createElement('button'),{
     className:'icon-button subboard-add',type:'button',title:'Add sub-board',ariaLabel:'Add sub-board',
     innerHTML:icon('plus')
   }));
+}
+function placementPositions(layout){
+  const positions=new Map(), seen=new Set();
+  const add=(id,tier,index)=>{
+    if(S.items[id]&&!seen.has(id)){ seen.add(id); positions.set(id,{tier,index}); }
+  };
+  (layout?.tiers||[]).forEach((tier,tierIndex)=>(tier.items||[])
+    .forEach((id,index)=>add(id,tierIndex,index)));
+  (layout?.pool||[]).forEach((id,index)=>add(id,S.tiers.length,index));
+  // An item omitted from an older layout is, like an item in its pool, unranked.
+  Object.keys(S.items).forEach((id,index)=>{ if(!positions.has(id))positions.set(id,{tier:S.tiers.length,index}); });
+  return positions;
+}
+function comparisonFor(id){
+  if(!compareSubBoardId)return null;
+  const other=S.subBoards.find(sub=>sub.id===compareSubBoardId);
+  if(!other)return null;
+  if(!comparisonState||comparisonState.otherId!==other.id){
+    comparisonState={otherId:other.id,current:placementPositions(layoutFromState()),target:placementPositions(other.layout)};
+  }
+  const current=comparisonState.current.get(id);
+  const target=comparisonState.target.get(id);
+  if(!current||!target)return null;
+  const tierPlaces=current.tier-target.tier;
+  // Horizontal positions are comparable only within the same ranked tier.
+  // Crossing tiers already has a vertical result; comparing the two row indexes
+  // would otherwise produce a misleading left/right shift.
+  const positionPlaces=current.tier===target.tier&&current.tier<S.tiers.length
+    ?current.index-target.index:0;
+  if(!tierPlaces&&!positionPlaces)return null;
+  return {tierPlaces,positionPlaces,other};
 }
 function snapshot(){ storeActiveSubBoard(); undoStack.push(JSON.stringify(S)); if(undoStack.length>40)undoStack.shift(); }
 function undo(){ if(!undoStack.length)return toast('Nothing to undo');
@@ -81,9 +149,39 @@ const listOf=ref=> ref==='pool' ? S.pool : (S.tiers.find(t=>t.id===ref)||{items:
 function removeIds(ids){ const set=new Set(ids);
   S.pool=S.pool.filter(i=>!set.has(i));
   S.tiers.forEach(t=>t.items=t.items.filter(i=>!set.has(i))); }
-function moveItems(ids,ref,beforeId){
+function completeLayout(layout){
+  const placements=new Map((layout?.tiers||[]).map(t=>[t.id,t.items||[]]));
+  const seen=new Set();
+  const valid=ids=>(ids||[]).filter(id=>S.items[id]&&!seen.has(id)&&(seen.add(id),true));
+  const complete={tiers:S.tiers.map(t=>({id:t.id,items:valid(placements.get(t.id))})),
+    pool:valid(layout?.pool)};
+  Object.keys(S.items).forEach(id=>{ if(!seen.has(id))complete.pool.push(id); });
+  return complete;
+}
+function moveBeforeInLayout(layout,ids,beforeId){
+  const lists=[...(layout.tiers||[]).map(t=>t.items),layout.pool];
+  const destination=lists.find(list=>list.includes(beforeId));
+  if(!destination)return false;
+  const moving=new Set(ids);
+  lists.forEach(list=>{ for(let i=list.length-1;i>=0;i--)if(moving.has(list[i]))list.splice(i,1); });
+  destination.splice(destination.indexOf(beforeId),0,...ids);
+  return true;
+}
+function moveItems(ids,ref,beforeId,syncSubBoards=false){
   ids=ids.filter(i=>S.items[i]); if(!ids.length)return;
-  snapshot(); removeIds(ids);
+  snapshot();
+  if(syncSubBoards&&beforeId&&!ids.includes(beforeId)){
+    let synced=0;
+    S.subBoards.forEach(sub=>{
+      sub.layout=completeLayout(sub.layout);
+      if(moveBeforeInLayout(sub.layout,ids,beforeId))synced++;
+    });
+    applySubBoardLayout(activeSubBoard().layout);
+    persist(); render();
+    toast(`Moved on ${synced} sub-board${synced===1?'':'s'}`);
+    return;
+  }
+  removeIds(ids);
   const L=listOf(ref); let at=beforeId?L.indexOf(beforeId):-1;
   if(at<0)at=L.length; L.splice(at,0,...ids); persist(); render();
 }
@@ -119,12 +217,22 @@ function applyFilter(){
 function itemNode(id){
   const it=S.items[id]; if(!it)return document.createComment('missing');
   const el=document.createElement('div');
-  el.className='item'+(sel.has(id)?' sel':'')+(it.notes?' hasnote':'');
-  el.dataset.id=id; el.draggable=true; el.title=it.name+(it.notes?'\n'+it.notes:'');
+  const comparison=comparisonFor(id);
+  el.className='item'+(sel.has(id)?' sel':'')+(it.notes?' hasnote':'')+(comparison?' compared':'');
+  el.dataset.id=id; el.draggable=true;
+  const tierShift=Math.abs(comparison?.tierPlaces||0), positionShift=Math.abs(comparison?.positionPlaces||0);
+  const tierDirection=comparison?.tierPlaces>0?'up':'down';
+  const positionDirection=comparison?.positionPlaces>0?'left':'right';
+  const changes=[];
+  if(tierShift)changes.push(`${comparison.other.name} ranks this ${tierShift} tier${tierShift===1?'':'s'} ${tierDirection==='up'?'higher':'lower'}`);
+  if(positionShift)changes.push(`${comparison.other.name} places this ${positionShift} spot${positionShift===1?'':'s'} to the ${positionDirection}`);
+  el.title=it.name+(it.notes?'\n'+it.notes:'')+(changes.length?`\n${changes.join('\n')}`:'');
   const meta=[(it.tags||[]).join(', '),it.notes||''].filter(Boolean).join(' · ');
   el.innerHTML=(it.img?`<img src="${esc(it.img)}" alt="${esc(it.name)}" loading="lazy"
       onerror="this.style.display='none';this.parentNode.classList.add('noimg')">`:'')
     +`<span class="badge">●</span>`
+    +(tierShift?`<span class="rank-shift vertical ${tierDirection}" aria-label="${esc(changes[0])}">${movementArrow(tierDirection)}<b>${tierShift}</b></span>`:'')
+    +(positionShift?`<span class="rank-shift horizontal ${positionDirection}" aria-label="${esc(changes[changes.length-1])}">${movementArrow(positionDirection)}<b>${positionShift}</b></span>`:'')
     +`<span class="cap">${esc(it.name)}${meta?`<span class="meta"> — ${esc(meta)}</span>`:''}</span>`;
   if(!it.img) el.style.cssText+='background:#2a3040;display:flex;align-items:center;justify-content:center';
   return el;
@@ -133,7 +241,7 @@ function fillDrop(node,ids){ const f=document.createDocumentFragment();
   ids.forEach(id=>f.appendChild(itemNode(id))); node.replaceChildren(f); }
 
 function render(){
-  ensureSubBoards(); renderSubBoards();
+  ensureSubBoards(); renderSubBoards(); comparisonState=null;
   document.body.className='lab-'+S.opts.labels;
   applyTitleWidth();
   $('#title').value=S.title; $('#labmode').value=S.opts.labels;
@@ -323,7 +431,8 @@ document.addEventListener('drop',e=>{ const d=e.target.closest('.drop'); if(!d||
   e.preventDefault();
   const ids=[...dragIds], destination=d.dataset.list;
   const beforeId=dragTarget===d?dragBeforeId:placementAt(d,e.clientX,e.clientY).beforeId;
-  clearDrag(); moveItems(ids,destination,beforeId);
+  const syncSubBoards=(e.ctrlKey||e.metaKey)&&!!beforeId;
+  clearDrag(); moveItems(ids,destination,beforeId,syncSubBoards);
 });
 
 /* ============================ KEYBOARD ============================ */
@@ -431,8 +540,16 @@ $('#btnClearSearch').onclick=()=>{ $('#q').value=''; applyFilter(); $('#q').focu
 $('#labmode').onchange=e=>{ S.opts.labels=e.target.value; document.body.className='lab-'+e.target.value; persist(); };
 function switchSubBoard(id){
   const next=S.subBoards.find(sub=>sub.id===id); if(!next||next.id===S.activeSubBoardId)return;
-  storeActiveSubBoard(); S.activeSubBoardId=next.id; applySubBoardLayout(next.layout);
+  storeActiveSubBoard(); S.activeSubBoardId=next.id; compareSubBoardId=next.compareSubBoardId||null;
+  applySubBoardLayout(next.layout);
   sel.clear(); lastClicked=null; persist(); render(); toast(`Switched to "${next.name}"`);
+}
+function compareSubBoards(viewId,otherId){
+  const view=S.subBoards.find(sub=>sub.id===viewId), other=S.subBoards.find(sub=>sub.id===otherId);
+  if(!view||!other||view.id===other.id)return;
+  storeActiveSubBoard(); S.activeSubBoardId=view.id; view.compareSubBoardId=other.id;
+  compareSubBoardId=other.id; applySubBoardLayout(view.layout);
+  sel.clear(); lastClicked=null; persist(); render(); toast(`Comparing "${view.name}" with "${other.name}"`);
 }
 function addSubBoard(){
   const clean=`Alternative ${S.subBoards.length}`;
@@ -457,6 +574,9 @@ function startInlineSubBoardRename(tab){
 }
 $('#subboardTabs').onclick=e=>{
   if(e.target.closest('.subboard-add')){ addSubBoard(); return; }
+  if(e.target.closest('[data-clear-comparison]')){
+    activeSubBoard().compareSubBoardId=null; compareSubBoardId=null; persist(); render(); toast('Comparison cleared'); return;
+  }
   const remove=e.target.closest('[data-delete-subboard]');
   if(remove){
     const id=remove.dataset.deleteSubboard;
@@ -468,6 +588,7 @@ $('#subboardTabs').onclick=e=>{
     snapshot(); storeActiveSubBoard();
     const deletingActive=id===S.activeSubBoardId;
     S.subBoards=S.subBoards.filter(sub=>sub.id!==id);
+    S.subBoards.forEach(sub=>{ if(sub.compareSubBoardId===id)sub.compareSubBoardId=null; });
     if(deletingActive){ S.activeSubBoardId=S.subBoards[0].id; applySubBoardLayout(S.subBoards[0].layout); }
     persist(); render(); toast('Deleted sub-board'); return;
   }
