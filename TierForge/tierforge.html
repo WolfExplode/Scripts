@@ -1,0 +1,1096 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TierForge</title>
+<style>
+:root{
+  --bg:#14161a; --panel:#1c1f26; --panel2:#232733; --line:#333a48;
+  --fg:#e7eaf0; --dim:#98a1b3; --accent:#6ea8ff; --accent2:#ffcc66;
+  --danger:#ff6b6b; --ok:#5fd68a;
+  --size:96px; --gap:3px; --labelw:150px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{background:var(--bg);color:var(--fg);font:14px/1.45 "Segoe UI",system-ui,sans-serif;
+  display:flex;flex-direction:column;overflow:hidden}
+button,input,select,textarea{font:inherit;color:inherit}
+button{background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:5px 10px;cursor:pointer}
+button:hover{background:#2c3242;border-color:#4a566b}
+button.primary{background:var(--accent);color:#0b1220;border-color:transparent;font-weight:600}
+button.primary:hover{background:#8dbaff}
+button.ghost{background:transparent}
+button.danger:hover{background:#4a2020;border-color:var(--danger)}
+input,select,textarea{background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:5px 8px}
+input:focus,textarea:focus,select:focus{outline:2px solid var(--accent);outline-offset:-1px}
+.row{display:flex;align-items:center;gap:8px}
+.sep{width:1px;height:22px;background:var(--line);margin:0 2px}
+.spacer{flex:1}
+small,.muted{color:var(--dim)}
+
+/* ---------- top bar ---------- */
+header{display:flex;flex-direction:column;gap:6px;padding:8px 10px;background:var(--panel);
+  border-bottom:1px solid var(--line);flex:none}
+#title{background:transparent;border:none;font-size:17px;font-weight:600;padding:2px 4px;min-width:220px}
+#title:hover{background:var(--panel2)}
+#q{width:280px}
+#qcount{min-width:70px;font-variant-numeric:tabular-nums}
+kbd{background:#2a3040;border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;
+  padding:0 5px;font-size:11px;font-family:inherit;color:var(--dim)}
+
+/* ---------- board ---------- */
+main{flex:1;overflow:auto;padding:10px;display:flex;flex-direction:column;gap:14px}
+#board{display:flex;flex-direction:column;gap:var(--gap);border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.tier{display:flex;min-height:calc(var(--size) + 8px);background:var(--panel);}
+.tier + .tier{border-top:1px solid var(--line)}
+.tlabel{width:var(--labelw);flex:none;display:flex;flex-direction:column;align-items:center;
+  justify-content:center;gap:2px;padding:6px;color:#111;position:relative;cursor:default}
+.tlabel .txt{width:100%;text-align:center;font-weight:700;font-size:15px;word-break:break-word;
+  outline:none;border-radius:4px;padding:2px}
+.tlabel .txt:focus{background:rgba(255,255,255,.45)}
+.tlabel .hot{display:none}
+.tlabel .cnt{display:none}
+.tools{position:absolute;top:2px;right:2px;display:none;gap:2px}
+.tlabel:hover .tools{display:flex}
+.tools button{padding:1px 5px;font-size:11px;line-height:16px;background:rgba(0,0,0,.35);
+  color:#fff;border-color:rgba(255,255,255,.25)}
+.drop{flex:1;display:flex;flex-wrap:wrap;align-content:flex-start;gap:2px;padding:3px;
+  background:#0f1115;min-height:calc(var(--size) + 8px)}
+.drop.over{background:#1b2438;outline:2px dashed var(--accent);outline-offset:-2px}
+
+/* ---------- pool ---------- */
+#poolwrap{border:1px solid var(--line);border-radius:8px;background:var(--panel);overflow:hidden}
+#poolhead{display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--panel2);
+  border-bottom:1px solid var(--line)}
+#pool{padding:5px;background:#0f1115;min-height:calc(var(--size) + 20px)}
+
+/* ---------- item ---------- */
+.item{position:relative;width:var(--size);height:var(--size);flex:none;cursor:grab;
+  background:#000;border-radius:4px;overflow:hidden;user-select:none;
+  border:2px solid transparent}
+.item img{width:100%;height:100%;object-fit:contain;display:block;pointer-events:none}
+.item.sel{border-color:var(--accent2);box-shadow:0 0 0 2px rgba(255,204,102,.35)}
+.item.dim{opacity:.18;filter:grayscale(1)}
+.item.dim.sel{opacity:.6;filter:none}
+.item.hit{border-color:var(--ok)}
+.item.dragging{opacity:.4}
+.item .badge{position:absolute;top:0;right:0;background:rgba(0,0,0,.65);font-size:10px;
+  padding:0 3px;border-bottom-left-radius:4px;color:var(--accent2);display:none}
+.item.hasnote .badge{display:block}
+
+/* caption: ALWAYS in the DOM so browser Ctrl+F can find + scroll to it.
+   opacity:0 keeps native find working (display:none / visibility:hidden would not). */
+.cap{position:absolute;left:0;right:0;bottom:0;font-size:10px;line-height:1.25;padding:1px 3px;
+  background:rgba(0,0,0,.72);color:#fff;opacity:0;transition:opacity .1s;
+  max-height:100%;overflow:hidden;word-break:break-word;pointer-events:none}
+body.lab-show .cap{opacity:1}
+body.lab-hover .item:hover .cap{opacity:1}
+body.lab-show .cap .meta,body.lab-hover .cap .meta{display:none}
+.cap .meta{color:#bbb}
+
+/* ---------- inspector ---------- */
+#insp{position:fixed;top:0;right:0;bottom:0;width:320px;background:var(--panel);
+  border-left:1px solid var(--line);padding:12px;display:none;flex-direction:column;gap:8px;
+  overflow:auto;z-index:40;box-shadow:-8px 0 24px rgba(0,0,0,.4)}
+#insp.on{display:flex}
+#insp img{width:100%;max-height:200px;object-fit:contain;background:#000;border-radius:6px}
+#insp label{font-size:12px;color:var(--dim);display:block;margin-top:4px}
+#insp input,#insp textarea{width:100%}
+
+/* ---------- dialogs ---------- */
+dialog{background:var(--panel);color:var(--fg);border:1px solid var(--line);border-radius:10px;
+  padding:0;width:min(760px,94vw);max-height:88vh}
+dialog::backdrop{background:rgba(0,0,0,.6)}
+dialog h3{margin:0;padding:12px 14px;border-bottom:1px solid var(--line);font-size:15px}
+.dbody{padding:14px;display:flex;flex-direction:column;gap:10px;overflow:auto;max-height:66vh}
+.dfoot{padding:10px 14px;border-top:1px solid var(--line);display:flex;gap:8px;justify-content:flex-end}
+textarea{width:100%;min-height:120px;font-family:Consolas,monospace;font-size:12px;resize:vertical}
+.tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);padding:0 14px}
+.tabs button{border:none;border-radius:6px 6px 0 0;background:transparent;color:var(--dim);padding:8px 12px}
+.tabs button.on{background:var(--panel2);color:var(--fg)}
+.tabpane{display:none;flex-direction:column;gap:10px}
+.tabpane.on{display:flex}
+#log{font-family:Consolas,monospace;font-size:12px;white-space:pre-wrap;color:var(--dim);
+  max-height:150px;overflow:auto;background:#0f1115;border-radius:6px;padding:8px}
+.note{background:#1a2333;border-left:3px solid var(--accent);padding:8px 10px;border-radius:0 6px 6px 0;font-size:12.5px}
+a{color:var(--accent)}
+#toast{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);background:#000d;
+  border:1px solid var(--line);padding:8px 14px;border-radius:8px;z-index:99;display:none}
+#drophint{position:fixed;inset:0;background:rgba(20,30,50,.85);z-index:90;display:none;
+  align-items:center;justify-content:center;font-size:22px;border:4px dashed var(--accent)}
+#drophint.on{display:flex}
+</style>
+</head>
+<body class="lab-find">
+
+<header>
+  <div class="row">
+    <strong style="color:var(--accent2)">TierForge</strong>
+    <input id="title" value="Untitled Tier List" spellcheck="false">
+    <div class="sep"></div>
+    <button id="btnImport" class="primary">Import ▾</button>
+    <button id="btnAddTier">+ Tier</button>
+    <button id="btnExport">Export ▾</button>
+    <button id="btnBoards">Boards</button>
+    <div class="spacer"></div>
+    <span class="muted" id="stat"></span>
+    <button id="btnHelp" class="ghost">?</button>
+  </div>
+  <div class="row">
+    <input id="q" placeholder="Search name, tag, note…  ( / )" spellcheck="false">
+    <span id="qcount" class="muted"></span>
+    <button id="btnSelHits" title="Select every match">Select matches</button>
+    <div class="sep"></div>
+    <label class="row muted" style="gap:4px">Labels
+      <select id="labmode">
+        <option value="find">Ctrl+F only (hidden)</option>
+        <option value="show">Always visible</option>
+        <option value="hover">On hover</option>
+      </select>
+    </label>
+    <label class="row muted" style="gap:4px">Size
+      <input id="size" type="range" min="40" max="200" value="96" style="width:110px">
+    </label>
+    <div class="spacer"></div>
+    <span class="muted" id="selinfo"></span>
+    <button id="btnToPool" title="Send selection back to the pool">→ Pool</button>
+    <button id="btnClearSel" class="ghost">Deselect</button>
+  </div>
+</header>
+
+<main>
+  <div id="board"></div>
+  <div id="poolwrap">
+    <div id="poolhead">
+      <strong>Unranked pool</strong>
+      <span id="poolcount" class="muted"></span>
+      <div class="spacer"></div>
+      <button id="btnSortPool" class="ghost">Sort A→Z</button>
+      <button id="btnAddImgs" class="ghost">+ Add images…</button>
+      <input id="fileinput" type="file" accept="image/*" multiple hidden>
+    </div>
+    <div id="pool" class="drop" data-list="pool"></div>
+  </div>
+</main>
+
+<aside id="insp"></aside>
+<div id="toast"></div>
+<div id="drophint">Drop images to add them to the pool</div>
+
+<!-- ============ IMPORT DIALOG ============ -->
+<dialog id="dlgImport">
+  <h3>Import</h3>
+  <div class="tabs">
+    <button data-tab="url" class="on">TierMaker URL</button>
+    <button data-tab="grab">Grab from page</button>
+    <button data-tab="json">JSON pack</button>
+    <button data-tab="text">Plain text</button>
+  </div>
+  <div class="dbody">
+    <div class="tabpane on" id="tab-url">
+      <div id="helperstate" class="note">Checking for the local helper…</div>
+      <input id="tmurl" placeholder="https://tiermaker.com/list/video-games/…" spellcheck="false">
+      <label class="row" style="gap:6px"><input type="checkbox" id="embedimgs"> Download &amp; embed images as data URLs (offline-safe, enables PNG export — slower)</label>
+      <label class="row" style="gap:6px"><input type="checkbox" id="mergeimp"> Merge into current board instead of replacing</label>
+      <div class="row"><button id="btnFetch" class="primary">Fetch &amp; import</button>
+        <span class="muted" style="font-size:12px">…or use the bookmarklet on the Grab tab — that one can't be blocked.</span></div>
+      <div id="log"></div>
+    </div>
+    <div class="tabpane" id="tab-grab">
+      <div class="note"><b>The fallback that always works.</b> TierMaker builds its item list with
+        JavaScript and blocks server-side readers, so view-source and public proxies often come back
+        empty. This runs inside your own tab, where the items are already on screen.</div>
+      <div class="note" style="border-color:var(--accent2)">It reads the tier rows that are
+        <b>on screen</b>, so it also captures a <code>?ref=list-remix</code> clone (whose placements
+        live only in your browser's storage, not in the link) and any dragging you have done on the
+        page but not saved.</div>
+      <ol style="margin:0;padding-left:20px;line-height:1.9">
+        <li>Drag this to your bookmarks bar → <a id="bmk" style="font-weight:700;padding:2px 8px;
+          background:var(--panel2);border:1px solid var(--line);border-radius:6px">📋 TierForge grab</a></li>
+        <li>Open the TierMaker <code>/list/</code> or <code>/create/</code> page and let the items load.</li>
+        <li>Click the bookmarklet — it copies everything to your clipboard.</li>
+        <li>Paste below and press <b>Load</b>.</li>
+      </ol>
+      <textarea id="pastegrab" placeholder='{"tierforge":1,…}  — or paste page HTML / the API JSON here'></textarea>
+      <label class="row" style="gap:6px"><input type="checkbox" id="mergepaste"> Merge into current board</label>
+      <div class="row"><button id="btnParsePaste" class="primary">Load</button>
+        <span id="grabhint" class="muted" style="font-size:12px"></span></div>
+    </div>
+    <div class="tabpane" id="tab-json">
+      <div class="note">A TierForge <code>.json</code> board, or a pack produced by
+        <code>scrape_tiermaker.py</code>.</div>
+      <textarea id="pastejson" placeholder='{"tiers":[…]}'></textarea>
+      <div class="row"><button id="btnParseJson" class="primary">Load JSON</button>
+        <button id="btnJsonFile">Load from file…</button>
+        <input id="jsonfile" type="file" accept=".json,application/json" hidden></div>
+    </div>
+    <div class="tabpane" id="tab-text">
+      <div class="note">One item per line — <code>Name | tag, tag | note</code>. Creates text-only
+        items (no image) that are fully searchable.</div>
+      <textarea id="pastetext" placeholder="Bash | attack, starter | 8 dmg for 2 vuln"></textarea>
+      <button id="btnParseText" class="primary">Add items</button>
+    </div>
+  </div>
+  <div class="dfoot"><button onclick="dlgImport.close()">Close</button></div>
+</dialog>
+
+<!-- ============ EXPORT DIALOG ============ -->
+<dialog id="dlgExport">
+  <h3>Export</h3>
+  <div class="dbody">
+    <div class="row"><button id="expJson" class="primary">Board JSON</button>
+      <button id="expPng">PNG image</button>
+      <button id="expMd">Markdown</button>
+      <button id="expCsv">CSV</button>
+      <button id="expEmbed">Embed all images (offline pack)</button>
+      <button id="expTm">Back to TierMaker</button></div>
+    <div class="note">PNG export needs every image to be CORS-clean. Remote TierMaker images are
+      routed through an image proxy automatically; if that fails, run
+      <strong>Embed all images</strong> first.</div>
+    <div id="explog" ></div>
+    <textarea id="expout" style="min-height:220px" spellcheck="false"></textarea>
+  </div>
+  <div class="dfoot"><button id="expCopy">Copy</button><button onclick="dlgExport.close()">Close</button></div>
+</dialog>
+
+<!-- ============ BOARDS DIALOG ============ -->
+<dialog id="dlgBoards">
+  <h3>Saved boards</h3>
+  <div class="dbody">
+    <div class="row"><input id="boardname" placeholder="Board name" style="flex:1">
+      <button id="btnSaveBoard" class="primary">Save current</button></div>
+    <div id="boardlist"></div>
+    <div class="note">Boards live in this browser's localStorage for this file. Use
+      <em>Export → Board JSON</em> for anything you want to keep permanently.</div>
+  </div>
+  <div class="dfoot"><button onclick="dlgBoards.close()">Close</button></div>
+</dialog>
+
+<!-- ============ HELP ============ -->
+<dialog id="dlgHelp">
+  <h3>How it works</h3>
+  <div class="dbody">
+    <p><strong>Finding things.</strong> Every item carries a caption node holding its name, tags and
+      notes. In <em>Ctrl+F only</em> mode that caption is rendered at zero opacity — invisible, but
+      the browser's own <kbd>Ctrl</kbd>+<kbd>F</kbd> still matches it, scrolls to it and highlights
+      the tile. The in-app search box (<kbd>/</kbd>) additionally dims non-matches and can select
+      every hit at once.</p>
+    <p><strong>Search syntax.</strong> Space-separated terms are ANDed. <code>tag:starter</code>,
+      <code>tier:A</code>, <code>note:vuln</code>, <code>-word</code> to exclude, <code>"two words"</code>
+      for a phrase.</p>
+    <p><strong>Moving items.</strong> Drag one tile, or click tiles to build a selection
+      (<kbd>Shift</kbd>+click for a range) and drag any of them to move the whole set. With a
+      selection active, press <kbd>1</kbd>…<kbd>9</kbd> to fling it into that tier, <kbd>0</kbd> to
+      send it back to the pool.</p>
+    <p><strong>Keys.</strong> <kbd>/</kbd> search · <kbd>Esc</kbd> clear · <kbd>Ctrl</kbd>+<kbd>A</kbd>
+      select matches · <kbd>Del</kbd> delete selection · <kbd>Ctrl</kbd>+<kbd>S</kbd> save board ·
+      <kbd>Ctrl</kbd>+<kbd>Z</kbd> undo · double-click a tile to open the inspector.</p>
+    <p><strong>Importing.</strong> TierMaker builds its item carousel in JavaScript and blocks
+      server-side readers, so a browser on its own can't reliably scrape it. Run
+      <code>python scrape_tiermaker.py --serve</code> in this folder (or double-click
+      <code>TierForge.cmd</code>) and open the page it hands you — the URL box then imports
+      directly. Without the helper, use the bookmarklet on the <em>Grab from page</em> tab: it runs
+      inside your own TierMaker tab, where there is no CORS and no challenge. Public proxies are
+      tried too, but they often come back empty.</p>
+    <p><strong>Remix links and going back.</strong> A <code>?ref=list-remix</code> link holds no list
+      id — TierMaker's clone button keeps the arrangement in your browser's storage — so only the
+      bookmarklet can pick it up, and it does, along with anything you have dragged on that page.
+      <em>Export → Back to TierMaker</em> reverses the trip: it rebuilds TierMaker's own list code
+      from your board and hands you a bookmarklet that opens it there.</p>
+  </div>
+  <div class="dfoot"><button onclick="dlgHelp.close()">Close</button></div>
+</dialog>
+
+<script>
+"use strict";
+const $=(s,r=document)=>r.querySelector(s), $$=(s,r=document)=>[...r.querySelectorAll(s)];
+const uid=()=>Math.random().toString(36).slice(2,10);
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+/* TierMaker's stock row palette, indexed by the colour number in templateCode */
+const TM_COLORS=['#ff7f7f','#ffbf7f','#ffdf7f','#ffff7f','#bfff7f','#7fff7f','#7fffff','#7fbfff','#7f7fff','#ff7fff'];
+const DEFAULT_TIERS=[['S','#ff7f7f'],['A','#ffbf7f'],['B','#ffdf7f'],['C','#ffff7f'],['D','#bfff7f'],['F','#7fff7f']];
+
+/* ============================ STATE ============================ */
+let S=null, sel=new Set(), lastClicked=null, undoStack=[];
+
+function blankState(){
+  return {v:1,title:'Untitled Tier List',source:'',
+    tiers:DEFAULT_TIERS.map(([l,c])=>({id:uid(),label:l,color:c,items:[]})),
+    pool:[],items:{},opts:{size:96,labels:'find'}};
+}
+function snapshot(){ undoStack.push(JSON.stringify(S)); if(undoStack.length>40)undoStack.shift(); }
+function undo(){ if(!undoStack.length)return toast('Nothing to undo');
+  S=JSON.parse(undoStack.pop()); sel.clear(); render(); toast('Undone'); }
+
+/* list helpers -------------------------------------------------- */
+const listOf=ref=> ref==='pool' ? S.pool : (S.tiers.find(t=>t.id===ref)||{items:[]}).items;
+function removeIds(ids){ const set=new Set(ids);
+  S.pool=S.pool.filter(i=>!set.has(i));
+  S.tiers.forEach(t=>t.items=t.items.filter(i=>!set.has(i))); }
+function moveItems(ids,ref,beforeId){
+  ids=ids.filter(i=>S.items[i]); if(!ids.length)return;
+  snapshot(); removeIds(ids);
+  const L=listOf(ref); let at=beforeId?L.indexOf(beforeId):-1;
+  if(at<0)at=L.length; L.splice(at,0,...ids); persist(); render();
+}
+function tierOf(id){ const t=S.tiers.find(t=>t.items.includes(id)); return t?t.label:''; }
+
+/* ============================ SEARCH ============================ */
+function parseQuery(q){
+  const terms=[]; const re=/(-?)(?:(\w+):)?(?:"([^"]*)"|(\S+))/g; let m;
+  while((m=re.exec(q))){ const val=(m[3]??m[4]??'').toLowerCase(); if(!val)continue;
+    terms.push({neg:m[1]==='-',field:(m[2]||'').toLowerCase(),val}); }
+  return terms;
+}
+function haystack(it){
+  return {any:[it.name,(it.tags||[]).join(' '),it.notes||'',tierOf(it.id)].join(' ').toLowerCase(),
+    name:(it.name||'').toLowerCase(), tag:(it.tags||[]).join(' ').toLowerCase(),
+    note:(it.notes||'').toLowerCase(), tier:tierOf(it.id).toLowerCase()};
+}
+function matches(it,terms){
+  if(!terms.length)return true; const h=haystack(it);
+  return terms.every(t=>{ const f=(t.field&&h[t.field]!==undefined)?h[t.field]:h.any;
+    const hit=f.includes(t.val); return t.neg?!hit:hit; });
+}
+function applyFilter(){
+  const q=$('#q').value.trim(), terms=parseQuery(q); let hits=0;
+  $$('.item').forEach(el=>{ const it=S.items[el.dataset.id]; if(!it)return;
+    const ok=matches(it,terms); if(ok)hits++;
+    el.classList.toggle('dim',!!q&&!ok); el.classList.toggle('hit',!!q&&ok); });
+  $('#qcount').textContent=q?`${hits} match${hits===1?'':'es'}`:'';
+}
+
+/* ============================ RENDER ============================ */
+function itemNode(id){
+  const it=S.items[id]; if(!it)return document.createComment('missing');
+  const el=document.createElement('div');
+  el.className='item'+(sel.has(id)?' sel':'')+(it.notes?' hasnote':'');
+  el.dataset.id=id; el.draggable=true; el.title=it.name+(it.notes?'\n'+it.notes:'');
+  const meta=[(it.tags||[]).join(', '),it.notes||''].filter(Boolean).join(' · ');
+  el.innerHTML=(it.img?`<img src="${esc(it.img)}" alt="${esc(it.name)}" loading="lazy"
+      onerror="this.style.display='none';this.parentNode.classList.add('noimg')">`:'')
+    +`<span class="badge">●</span>`
+    +`<span class="cap">${esc(it.name)}${meta?`<span class="meta"> — ${esc(meta)}</span>`:''}</span>`;
+  if(!it.img) el.style.cssText+='background:#2a3040;display:flex;align-items:center;justify-content:center';
+  return el;
+}
+function fillDrop(node,ids){ const f=document.createDocumentFragment();
+  ids.forEach(id=>f.appendChild(itemNode(id))); node.replaceChildren(f); }
+
+function render(){
+  document.body.className='lab-'+S.opts.labels;
+  document.documentElement.style.setProperty('--size',S.opts.size+'px');
+  $('#title').value=S.title; $('#labmode').value=S.opts.labels; $('#size').value=S.opts.size;
+
+  const board=$('#board'); board.replaceChildren();
+  S.tiers.forEach((t,i)=>{
+    const row=document.createElement('div'); row.className='tier'; row.dataset.tier=t.id;
+    row.innerHTML=`
+      <div class="tlabel" style="background:${esc(t.color)}">
+        ${i<9?`<span class="hot">${i+1}</span>`:''}
+        <div class="txt" contenteditable="plaintext-only" spellcheck="false">${esc(t.label)}</div>
+        <div class="cnt">${t.items.length}</div>
+        <div class="tools">
+          <button data-act="color" title="Colour">◧</button>
+          <button data-act="up" title="Move up">▲</button>
+          <button data-act="down" title="Move down">▼</button>
+          <button data-act="clear" title="Empty this tier">⤓</button>
+          <button data-act="del" title="Delete tier">✕</button>
+        </div>
+      </div>
+      <div class="drop" data-list="${t.id}"></div>`;
+    fillDrop($('.drop',row),t.items); board.appendChild(row);
+  });
+  fillDrop($('#pool'),S.pool);
+  $('#poolcount').textContent=`${S.pool.length} item${S.pool.length===1?'':'s'}`;
+  const total=Object.keys(S.items).length;
+  $('#stat').textContent=`${total} items · ${S.tiers.length} tiers · ${total-S.pool.length} ranked`;
+  $('#selinfo').textContent=sel.size?`${sel.size} selected`:'';
+  applyFilter();
+}
+
+/* ============================ SELECTION ============================ */
+function setSel(ids){ sel=new Set(ids); syncSel(); }
+function syncSel(){ $$('.item').forEach(e=>e.classList.toggle('sel',sel.has(e.dataset.id)));
+  $('#selinfo').textContent=sel.size?`${sel.size} selected`:''; }
+function flatOrder(){ return [...S.tiers.flatMap(t=>t.items),...S.pool]; }
+
+/* ============================ EVENTS: board ============================ */
+document.addEventListener('click',e=>{
+  const tool=e.target.closest('.tools button');
+  if(tool){ const tid=tool.closest('.tier').dataset.tier; tierAction(tid,tool.dataset.act); return; }
+  const it=e.target.closest('.item');
+  if(it){ const id=it.dataset.id;
+    if(e.shiftKey&&lastClicked){ const ord=flatOrder(); const a=ord.indexOf(lastClicked),b=ord.indexOf(id);
+      if(a>=0&&b>=0) ord.slice(Math.min(a,b),Math.max(a,b)+1).forEach(x=>sel.add(x)); }
+    else if(e.ctrlKey||e.metaKey){ sel.has(id)?sel.delete(id):sel.add(id); lastClicked=id; }
+    else { const only=sel.size===1&&sel.has(id); sel.clear(); if(!only)sel.add(id); lastClicked=id; }
+    syncSel(); return; }
+  if(!e.target.closest('#insp')&&!e.target.closest('header')&&!e.target.closest('dialog')){
+    if(e.target.closest('main')&&!e.target.closest('.tlabel')){ sel.clear(); syncSel(); closeInsp(); } }
+});
+document.addEventListener('dblclick',e=>{ const it=e.target.closest('.item'); if(it)openInsp(it.dataset.id); });
+
+function tierAction(tid,act){
+  const i=S.tiers.findIndex(t=>t.id===tid), t=S.tiers[i]; if(!t)return; snapshot();
+  if(act==='del'){ S.pool.push(...t.items); S.tiers.splice(i,1); }
+  else if(act==='clear'){ S.pool.push(...t.items); t.items=[]; }
+  else if(act==='up'&&i>0){ S.tiers.splice(i-1,0,S.tiers.splice(i,1)[0]); }
+  else if(act==='down'&&i<S.tiers.length-1){ S.tiers.splice(i+1,0,S.tiers.splice(i,1)[0]); }
+  else if(act==='color'){ const inp=document.createElement('input'); inp.type='color'; inp.value=t.color;
+    inp.oninput=()=>{ t.color=inp.value; $(`.tier[data-tier="${tid}"] .tlabel`).style.background=inp.value; };
+    inp.onchange=()=>{ persist(); }; inp.click(); return; }
+  persist(); render();
+}
+document.addEventListener('input',e=>{ if(e.target.classList.contains('txt')){
+  const tid=e.target.closest('.tier').dataset.tier;
+  const t=S.tiers.find(t=>t.id===tid); if(t){ t.label=e.target.textContent.trim(); persist(); } }});
+
+/* ============================ DRAG & DROP ============================ */
+let dragIds=[];
+document.addEventListener('dragstart',e=>{ const it=e.target.closest('.item'); if(!it)return;
+  const id=it.dataset.id; dragIds=sel.has(id)?[...sel]:[id];
+  if(!sel.has(id)){ sel.clear(); sel.add(id); syncSel(); }
+  e.dataTransfer.effectAllowed='move'; e.dataTransfer.setData('text/plain',id);
+  requestAnimationFrame(()=>dragIds.forEach(x=>$(`.item[data-id="${x}"]`)?.classList.add('dragging')));
+});
+document.addEventListener('dragend',()=>{ dragIds=[]; $$('.dragging').forEach(e=>e.classList.remove('dragging'));
+  $$('.drop.over').forEach(e=>e.classList.remove('over')); });
+document.addEventListener('dragover',e=>{ const d=e.target.closest('.drop'); if(!d||!dragIds.length)return;
+  e.preventDefault(); e.dataTransfer.dropEffect='move';
+  $$('.drop.over').forEach(x=>x!==d&&x.classList.remove('over')); d.classList.add('over'); });
+document.addEventListener('drop',e=>{ const d=e.target.closest('.drop'); if(!d||!dragIds.length)return;
+  e.preventDefault(); moveItems(dragIds,d.dataset.list,insertBefore(d,e.clientX,e.clientY)); dragIds=[]; });
+function insertBefore(cont,x,y){
+  for(const el of $$('.item',cont)){ if(el.classList.contains('dragging'))continue;
+    const r=el.getBoundingClientRect();
+    if(y<r.bottom && x<r.left+r.width/2) return el.dataset.id; }
+  return null;
+}
+
+/* ============================ KEYBOARD ============================ */
+document.addEventListener('keydown',e=>{
+  const typing=/^(INPUT|TEXTAREA)$/.test(e.target.tagName)||e.target.isContentEditable;
+  if(e.key==='/'&&!typing){ e.preventDefault(); $('#q').focus(); $('#q').select(); return; }
+  if(e.key==='Escape'){ if(typing&&e.target.id==='q'){ $('#q').value=''; applyFilter(); e.target.blur(); }
+    else { sel.clear(); syncSel(); closeInsp(); } return; }
+  if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='s'){ e.preventDefault(); quickSave(); return; }
+  if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'&&!typing){ e.preventDefault(); undo(); return; }
+  if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='a'&&!typing){ e.preventDefault(); selectHits(); return; }
+  if(typing)return;
+  if(/^[1-9]$/.test(e.key)){ const t=S.tiers[+e.key-1];
+    if(t&&sel.size){ moveItems([...sel],t.id,null); toast(`Moved ${sel.size} → ${t.label}`); } return; }
+  if(e.key==='0'&&sel.size){ moveItems([...sel],'pool',null); return; }
+  if((e.key==='Delete')&&sel.size){ snapshot(); [...sel].forEach(id=>delete S.items[id]);
+    removeIds([...sel]); sel.clear(); persist(); render(); return; }
+});
+
+/* ============================ INSPECTOR ============================ */
+function closeInsp(){ $('#insp').classList.remove('on'); }
+function openInsp(id){
+  const it=S.items[id]; if(!it)return; const p=$('#insp'); p.classList.add('on');
+  p.innerHTML=`
+    ${it.img?`<img src="${esc(it.img)}">`:''}
+    <label>Name</label><input id="i-name" value="${esc(it.name)}">
+    <label>Tags (comma separated)</label><input id="i-tags" value="${esc((it.tags||[]).join(', '))}">
+    <label>Notes — searchable</label><textarea id="i-notes" style="min-height:90px">${esc(it.notes||'')}</textarea>
+    <label>Image URL</label><input id="i-img" value="${esc(it.img||'')}">
+    <label>Source</label><div class="muted" style="font-size:11px;word-break:break-all">${esc(it.src||'—')}</div>
+    <div class="row"><button id="i-save" class="primary">Save</button>
+      <button id="i-del" class="danger">Delete item</button>
+      <div class="spacer"></div><button id="i-close" class="ghost">✕</button></div>`;
+  $('#i-close').onclick=closeInsp;
+  $('#i-del').onclick=()=>{ snapshot(); delete S.items[id]; removeIds([id]); closeInsp(); persist(); render(); };
+  $('#i-save').onclick=()=>{ snapshot();
+    it.name=$('#i-name').value.trim(); it.img=$('#i-img').value.trim();
+    it.tags=$('#i-tags').value.split(',').map(s=>s.trim()).filter(Boolean);
+    it.notes=$('#i-notes').value.trim(); persist(); render(); toast('Saved'); };
+  p.querySelectorAll('input,textarea').forEach(el=>el.addEventListener('keydown',ev=>{
+    if(ev.key==='Enter'&&el.tagName==='INPUT'){ ev.preventDefault(); $('#i-save').click(); } }));
+}
+
+/* ============================ TOOLBAR ============================ */
+$('#title').oninput=e=>{ S.title=e.target.value; persist(); };
+$('#q').oninput=applyFilter;
+$('#labmode').onchange=e=>{ S.opts.labels=e.target.value; document.body.className='lab-'+e.target.value; persist(); };
+$('#size').oninput=e=>{ S.opts.size=+e.target.value;
+  document.documentElement.style.setProperty('--size',e.target.value+'px'); persist(); };
+$('#size').addEventListener('mousedown',e=>{ if(e.button!==1) return; e.preventDefault();
+  $('#size').value=96; $('#size').dispatchEvent(new Event('input')); });
+$('#labmode').addEventListener('mousedown',e=>{ if(e.button!==1) return; e.preventDefault();
+  $('#labmode').value='find'; $('#labmode').dispatchEvent(new Event('change')); });
+$('#btnAddTier').onclick=()=>{ snapshot();
+  S.tiers.push({id:uid(),label:'New',color:TM_COLORS[S.tiers.length%10],items:[]}); persist(); render(); };
+$('#btnToPool').onclick=()=>sel.size&&moveItems([...sel],'pool',null);
+$('#btnClearSel').onclick=()=>{ sel.clear(); syncSel(); };
+$('#btnSelHits').onclick=selectHits;
+function selectHits(){ const terms=parseQuery($('#q').value.trim());
+  setSel(Object.values(S.items).filter(it=>matches(it,terms)).map(i=>i.id));
+  toast(`${sel.size} selected`); }
+$('#btnSortPool').onclick=()=>{ snapshot();
+  S.pool.sort((a,b)=>(S.items[a].name||'').localeCompare(S.items[b].name||'')); persist(); render(); };
+$('#btnAddImgs').onclick=()=>$('#fileinput').click();
+$('#fileinput').onchange=e=>addFiles([...e.target.files]);
+$('#btnHelp').onclick=()=>dlgHelp.showModal();
+$('#btnImport').onclick=async()=>{ dlgImport.showModal(); refreshHelperState(); };
+async function refreshHelperState(){
+  const el=$('#helperstate'); el.textContent='Checking for the local helper…';
+  helperBase=await findHelper();
+  if(helperBase){ el.innerHTML=`<b style="color:var(--ok)">Local helper connected</b> (${esc(helperBase)}).
+    Paste any <code>tiermaker.com/list/…</code> or <code>/create/…</code> link — it fetches and
+    rebuilds tiers, colours, images and placements directly.`; }
+  else { el.innerHTML=`<b style="color:var(--accent2)">No local helper.</b> TierMaker builds its item
+    list in JavaScript and blocks readers, so public proxies often come back empty. For a reliable
+    import run <code>python scrape_tiermaker.py --serve</code> in this folder and open the page it
+    gives you — or use the bookmarklet on the <b>Grab from page</b> tab. Trying the proxies is still
+    worth a shot.`; }
+}
+$('#btnExport').onclick=()=>dlgExport.showModal();
+$('#btnBoards').onclick=()=>{ renderBoards(); dlgBoards.showModal(); };
+$$('.tabs button').forEach(b=>b.onclick=()=>{ $$('.tabs button').forEach(x=>x.classList.remove('on'));
+  b.classList.add('on'); $$('.tabpane').forEach(p=>p.classList.remove('on'));
+  $('#tab-'+b.dataset.tab).classList.add('on'); });
+
+function toast(msg){ const t=$('#toast'); t.textContent=msg; t.style.display='block';
+  clearTimeout(toast._t); toast._t=setTimeout(()=>t.style.display='none',2200); }
+function log(msg){ const l=$('#log'); l.textContent+=msg+'\n'; l.scrollTop=l.scrollHeight; }
+
+/* ============================ FILE DROP ============================ */
+let dragDepth=0;
+window.addEventListener('dragenter',e=>{ if(!e.dataTransfer.types.includes('Files'))return;
+  dragDepth++; $('#drophint').classList.add('on'); });
+window.addEventListener('dragleave',()=>{ if(--dragDepth<=0){dragDepth=0;$('#drophint').classList.remove('on');} });
+window.addEventListener('drop',e=>{ if(!e.dataTransfer.files.length)return;
+  e.preventDefault(); dragDepth=0; $('#drophint').classList.remove('on');
+  const files=[...e.dataTransfer.files];
+  const j=files.find(f=>/\.json$/i.test(f.name));
+  if(j) return j.text().then(t=>loadJSON(t,false));
+  addFiles(files.filter(f=>f.type.startsWith('image/'))); });
+window.addEventListener('dragover',e=>{ if(e.dataTransfer.types.includes('Files'))e.preventDefault(); });
+
+function prettyName(s){ return s.replace(/\.[a-z0-9]+$/i,'').replace(/[_-]+/g,' ')
+  .replace(/([a-z])([A-Z])/g,'$1 $2').replace(/\s+/g,' ').trim()
+  .replace(/\b\w/g,c=>c.toUpperCase()); }
+async function addFiles(files){ if(!files.length)return; snapshot();
+  for(const f of files){ const url=await new Promise(r=>{ const fr=new FileReader();
+      fr.onload=()=>r(fr.result); fr.readAsDataURL(f); });
+    const id=uid(); S.items[id]={id,name:prettyName(f.name),tags:[],notes:'',img:url,src:f.name};
+    S.pool.push(id); }
+  persist(); render(); toast(`Added ${files.length} image${files.length===1?'':'s'}`); }
+
+/* ============================ PERSISTENCE ============================ */
+const LS='tierforge.current', LSB='tierforge.boards';
+function persist(){ try{ localStorage.setItem(LS,JSON.stringify(S)); }catch(err){ /* quota */ } }
+function quickSave(){ const name=S.title||'Board'; saveBoard(name); toast('Saved board "'+name+'"'); }
+function boards(){ try{ return JSON.parse(localStorage.getItem(LSB)||'{}'); }catch(e){ return {}; } }
+function saveBoard(name){ const b=boards(); b[name]={at:Date.now(),data:JSON.stringify(S)};
+  try{ localStorage.setItem(LSB,JSON.stringify(b)); }
+  catch(e){ toast('localStorage full — use Export → Board JSON'); } }
+function renderBoards(){ const b=boards(), wrap=$('#boardlist'); $('#boardname').value=S.title;
+  const names=Object.keys(b).sort();
+  wrap.innerHTML=names.length?names.map(n=>`<div class="row" style="padding:4px 0;border-bottom:1px solid var(--line)">
+      <span style="flex:1">${esc(n)}</span>
+      <small>${new Date(b[n].at).toLocaleString()}</small>
+      <button data-load="${esc(n)}">Load</button><button class="danger" data-drop="${esc(n)}">✕</button></div>`).join('')
+    :'<div class="muted">No saved boards yet.</div>';
+  $$('button[data-load]',wrap).forEach(x=>x.onclick=()=>{ snapshot(); S=JSON.parse(b[x.dataset.load].data);
+    sel.clear(); persist(); render(); dlgBoards.close(); });
+  $$('button[data-drop]',wrap).forEach(x=>x.onclick=()=>{ const bb=boards(); delete bb[x.dataset.drop];
+    localStorage.setItem(LSB,JSON.stringify(bb)); renderBoards(); });
+}
+$('#btnSaveBoard').onclick=()=>{ const n=$('#boardname').value.trim()||'Board';
+  S.title=n; saveBoard(n); renderBoards(); toast('Saved'); };
+
+/* ============================ TIERMAKER IMPORT ============================
+
+   TierMaker fills its item carousel from
+     /api/?type=templates-v2&id=<template>&lastEdited=<ts>&variation=<n>
+   which sends CORS headers only for bracketfights.com, and 403s anything that
+   doesn't look like a browser. Public proxies get 403/522 on it, and reader
+   proxies that *render* the page are rate-limited and silently fall back to the
+   raw HTML - which has an empty carousel. So the order of preference is:
+
+     1. the local helper (scrape_tiermaker.py --serve)  - always works
+     2. reader proxies, in case one renders the page today
+     3. the bookmarklet, which reads the already-built DOM in the user's own tab
+*/
+const HELPERS=['', 'http://127.0.0.1:8777', 'http://localhost:8777'];
+let helperBase=null;
+async function findHelper(){
+  for(const base of HELPERS){
+    if(base===''&&!/^https?:/.test(location.protocol))continue;   // file:// has no same-origin server
+    try{ const c=new AbortController(); setTimeout(()=>c.abort(),1500);
+      const r=await fetch(base+'/import',{signal:c.signal});
+      if(r.ok&&(await r.json()).helper==='tierforge') return base||location.origin;
+    }catch(e){}
+  }
+  return null;
+}
+async function importViaHelper(base,url,embed){
+  const q=base+'/import?url='+encodeURIComponent(url)+(embed?'&embed=1':'');
+  const r=await fetch(q);
+  const t=await r.text();
+  let j; try{ j=JSON.parse(t); }catch(e){ throw new Error('helper sent non-JSON'); }
+  if(!r.ok||j.error) throw new Error(j.error||('HTTP '+r.status));
+  return j;
+}
+
+const PROXIES=[
+  {name:'r.jina.ai',url:u=>'https://r.jina.ai/'+u,opts:{headers:{'x-return-format':'html'}}},
+  {name:'allorigins',url:u=>'https://api.allorigins.win/raw?url='+encodeURIComponent(u),opts:{}},
+  {name:'codetabs',url:u=>'https://api.codetabs.com/v1/proxy?quest='+encodeURIComponent(u),opts:{}},
+];
+async function fetchPage(url){
+  let lastErr;
+  for(const p of PROXIES){
+    try{ log(`  fetching via ${p.name}…`);
+      const r=await fetch(p.url(url),p.opts);
+      if(!r.ok) throw new Error('HTTP '+r.status);
+      const t=await r.text();
+      if(t.length<500) throw new Error('empty response');
+      if(/Just a moment|challenge-platform/i.test(t.slice(0,3000))) throw new Error('blocked by Cloudflare');
+      log(`  ok (${(t.length/1024|0)} KB)`); return t;
+    }catch(err){ lastErr=err; log(`  ${p.name} failed: ${err.message}`); }
+  }
+  throw lastErr||new Error('all proxies failed');
+}
+
+function nameFromUrl(u){ try{ return prettyName(decodeURIComponent(u.split('/').pop().split('?')[0])); }
+  catch(e){ return 'Item'; } }
+
+/** Pull `.character` tiles out of a TierMaker /create/ page. */
+function parseCharacters(html){
+  const doc=new DOMParser().parseFromString(html,'text/html'); const out=[];
+  doc.querySelectorAll('.character,.draggable-container,[class*="character"]').forEach(el=>{
+    let src=''; const bg=el.getAttribute('style')||'';
+    const m=bg.match(/url\((?:&quot;|["'])?(.*?)(?:&quot;|["'])?\)/);
+    if(m) src=m[1];
+    if(!src){ const img=el.querySelector('img'); src=img?.getAttribute('src')||img?.getAttribute('data-src')||''; }
+    if(!src||/^data:image\/gif/.test(src))return;
+    try{ src=new URL(src,'https://tiermaker.com/').href; }catch(e){ return; }
+    const label=(el.getAttribute('title')||el.getAttribute('data-name')||
+      el.querySelector('.character-name,.label,.name')?.textContent||
+      el.querySelector('img')?.getAttribute('alt')||'').trim();
+    const key=el.id||String(out.length+1);
+    if(out.some(o=>o.key===key))return;
+    out.push({key,src,name:label||nameFromUrl(src)});
+  });
+  return out;
+}
+/** templateCode = "template==Label|colorIdx|id|id==…" */
+function parseTemplateCode(html){
+  const m=html.match(/templateCode\s*=\s*"([^"]+)"/); if(!m)return null;
+  const parts=m[1].split('==');
+  return {template:parts[0],
+    tiers:parts.slice(1).filter(Boolean).map(seg=>{ const f=seg.split('|');
+      return {label:f[0],color:TM_COLORS[(+f[1]||0)%10],ids:f.slice(2).filter(x=>x!=='')}; })};
+}
+
+function buildFrom(chars,tc,merge,meta){
+  if(!merge) S=blankState();
+  S.source=meta.url||S.source;
+  if(meta.title&&!merge) S.title=meta.title;
+  const byKey={};
+  for(const c of chars){
+    const dup=Object.values(S.items).find(i=>i.img===c.src||i.src===c.src);
+    if(dup){ byKey[c.key]=dup.id; continue; }
+    const id=uid();
+    S.items[id]={id,name:c.name,tags:[],notes:'',img:c.src,src:c.src,tmkey:c.key};
+    byKey[c.key]=id; S.pool.push(id);
+  }
+  if(tc&&tc.tiers.length){
+    // rebuild tiers from the saved list; anything unreferenced stays in the pool
+    const known=Object.values(S.items).reduce((a,i)=>{ if(i.tmkey)a[i.tmkey]=i.id; return a; },byKey);
+    const newTiers=tc.tiers.map(t=>({id:uid(),label:t.label,color:t.color,
+      items:t.ids.map(k=>known[k]).filter(Boolean)}));
+    if(newTiers.some(t=>t.items.length)){
+      const placed=new Set(newTiers.flatMap(t=>t.items));
+      S.tiers=merge?[...S.tiers,...newTiers]:newTiers;
+      S.pool=S.pool.filter(i=>!placed.has(i));
+      S.tiers.forEach(t=>{ if(!newTiers.includes(t)) t.items=t.items.filter(i=>!placed.has(i)); });
+    }
+  }
+  sel.clear(); persist(); render();
+}
+
+/** "rgb(255, 127, 127)" / "#f77" -> "#ff7f7f" */
+function toHex(c){
+  if(!c)return '';
+  c=String(c).trim();
+  const m=c.match(/^rgba?\(([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)/i);
+  if(m) return '#'+[1,2,3].map(i=>Math.round(+m[i]).toString(16).padStart(2,'0')).join('');
+  if(/^#[0-9a-f]{3}$/i.test(c)) return '#'+[...c.slice(1)].map(x=>x+x).join('');
+  return /^#[0-9a-f]{6}$/i.test(c)?c.toLowerCase():'';
+}
+/** nearest index into TierMaker's stock palette, for writing templateCode back */
+function tmColorIndex(hex){
+  const p=toHex(hex)||'#ffffff';
+  const rgb=s=>[1,3,5].map(i=>parseInt(s.substr(i,2),16));
+  const [r,g,b]=rgb(p);
+  let best=0,bd=Infinity;
+  TM_COLORS.forEach((c,i)=>{ const [R,G,B]=rgb(c);
+    const d=(r-R)**2+(g-G)**2+(b-B)**2; if(d<bd){bd=d;best=i;} });
+  return best;
+}
+
+const cleanTitle=t=>String(t||'').replace(/\s*[-–|]\s*TierMaker.*$/i,'')
+  .replace(/^Create a\s+/i,'').replace(/\s*Tier List( Maker)?\s*$/i,'').trim();
+
+/** The templates-v2 URL a /create/ page would call, read out of that page. */
+function apiUrlFrom(html,template){
+  const v=html.match(/initList\(\s*"[^"]*"\s*,\s*"[^"]*"\s*,\s*"([^"]*)"/);
+  const d=html.match(/dateLastEdited\s*=\s*"([^"]*)"/);
+  return 'https://tiermaker.com/api/?'+new URLSearchParams({type:'templates-v2',
+    id:template, lastEdited:d?d[1]:'', variation:v?v[1]:''});
+}
+/** ["template",{src,id},…] — the shape templates-v2 answers with. */
+function parseApiItems(data,html){
+  if(typeof data==='string'){ try{ data=JSON.parse(data); }catch(e){ return []; } }
+  if(!Array.isArray(data))return [];
+  const base=(html||'').match(/baseTierImagePath\s*=\s*"([^"]*)"/);
+  const root='https://tiermaker.com'+(base?base[1]:'');
+  return data.slice(1).map((e,n)=>{
+    let src='',key=String(n+1);
+    if(e&&typeof e==='object'){ src=e.src||''; key=String(e.id??n+1); }
+    else if(typeof e==='string'){ src=root.replace(/\/$/,'')+'/'+e; }
+    if(!src)return null;
+    src=new URL(src,'https://tiermaker.com/').href;
+    return {key,src,name:nameFromUrl(src)};
+  }).filter(Boolean);
+}
+
+$('#btnFetch').onclick=async()=>{
+  const raw=$('#tmurl').value.trim(); if(!raw)return toast('Paste a URL first');
+  $('#log').textContent=''; const btn=$('#btnFetch'); btn.disabled=true;
+  const url=raw.split('#')[0].replace(/^http:/,'https:');
+  try{
+    if(!/tiermaker\.com\/(list|create)\//i.test(url))
+      throw new Error('Not a tiermaker.com /list/ or /create/ URL');
+    if(/[?&]ref=list-remix/i.test(raw)){
+      log('Note: a ?ref=list-remix link carries no list id — TierMaker keeps the');
+      log('cloned arrangement in your browser\'s localStorage, so nothing outside');
+      log('your tab can read it. You will get the template with empty tiers.');
+      log('For the placements: use the bookmarklet on that page, or paste the');
+      log('original /list/… link here instead.');
+      log('');
+    }
+
+    /* --- 1. local helper: does the whole job server-side --- */
+    if(helperBase===null) helperBase=await findHelper();
+    if(helperBase){
+      log('Using local helper at '+helperBase+' …');
+      const pack=await importViaHelper(helperBase,url,$('#embedimgs').checked);
+      S=normalize(pack); sel.clear(); persist(); render();
+      log(`Imported ${pack.items.length} items into ${pack.tiers.length} tiers.`);
+      return toast('Imported '+pack.items.length+' items');
+    }
+
+    /* --- 2. proxies --- */
+    log('No local helper — trying public proxies.');
+    let tc=null,template='',title='';
+    if(/\/list\//i.test(url)){
+      log('Reading list page…');
+      const listHtml=await fetchPage(url);
+      tc=parseTemplateCode(listHtml);
+      title=cleanTitle((listHtml.match(/<title>([^<]*)<\/title>/i)||[])[1]);
+      if(!tc) log('! no templateCode found — importing the template only');
+      template=tc?tc.template:'';
+      if(!template){ const m=url.match(/\/list\/[^/]+\/([^/]+)/); template=m?m[1]:''; }
+    } else { const m=url.match(/\/create\/([^/?#]+)/); template=m?m[1]:''; }
+    if(!template) throw new Error('could not work out the template name');
+    log('Template: '+template);
+
+    log('Reading template page…');
+    const tplHtml=await fetchPage('https://tiermaker.com/create/'+template);
+    let chars=parseCharacters(tplHtml);
+    if(chars.length) log(`Found ${chars.length} items in the rendered page`);
+    else{
+      log('Page came back unrendered — asking the templates-v2 API…');
+      try{ chars=parseApiItems(await fetchPage(apiUrlFrom(tplHtml,template)),tplHtml);
+           log(`API returned ${chars.length} items`); }
+      catch(e){ log('  API through a proxy failed: '+e.message); }
+    }
+    if(!chars.length) throw new Error('no items came back');
+    title=title||cleanTitle((tplHtml.match(/<title>([^<]*)<\/title>/i)||[])[1])||template;
+    buildFrom(chars,tc,$('#mergeimp').checked,{url,title});
+    log(`Imported ${chars.length} items into ${S.tiers.length} tiers.`);
+    if($('#embedimgs').checked) await embedAll(log);
+    toast('Imported '+chars.length+' items');
+  }catch(err){
+    log('ERROR: '+err.message);
+    log('');
+    log('TierMaker builds its item list in JavaScript and blocks readers, so proxies');
+    log('often come back empty. Two things that always work:');
+    log('  1. python scrape_tiermaker.py --serve   (then reload this page from it)');
+    log('  2. the bookmarklet on the "Grab from page" tab');
+  }
+  finally{ btn.disabled=false; }
+};
+
+$('#btnParsePaste').onclick=()=>{
+  const txt=$('#pastegrab').value.trim();
+  if(txt.length<50)return toast('Paste the bookmarklet output first');
+  if(txt[0]==='{'||txt[0]==='[') return loadJSON(txt,false);
+  const html=txt;
+  const chars=parseCharacters(html), tc=parseTemplateCode(html);
+  if(!chars.length&&!tc){
+    $('#grabhint').textContent = /initList\(/.test(html)
+      ? 'That is the raw page source — its items are added by JavaScript. Use the bookmarklet.'
+      : 'Nothing recognisable in that text.';
+    return;
+  }
+  if(!chars.length) $('#grabhint').textContent='Tiers only — no items in that paste.';
+  const title=cleanTitle((html.match(/<title>([^<]*)<\/title>/i)||[])[1]);
+  buildFrom(chars,tc,$('#mergepaste').checked,{title});
+  toast(`Parsed ${chars.length} items${tc?` + ${tc.tiers.length} tiers`:''}`);
+};
+
+/* The bookmarklet runs ON tiermaker.com, so /create/ and /api/ are same-origin:
+   no CORS, no Cloudflare challenge, no reader proxy.
+
+   It captures the arrangement that is actually on screen by reading the built
+   .tier-row elements - label text, the label holder's real background colour, and
+   the item ids in each row. That is what makes ?ref=list-remix work: TierMaker's
+   clone button stashes the list in localStorage[<template>TierListMakerCode] and
+   the create page rebuilds the rows from it, so by the time you click this the
+   list is right there in the DOM. It also picks up any rearranging you have done
+   by hand. templateCode and that localStorage key are read as fallbacks, and the
+   item catalogue comes from templates-v2. */
+$('#bmk').setAttribute('href','javascript:'+[
+"(function(){var L=location.href,H=document.documentElement.innerHTML,",
+"TC=(H.match(/templateCode\\s*=\\s*\"([^\"]+)\"/)||[])[1]||'',",
+"T=TC?TC.split('==')[0]:((L.match(/\\/(?:create|list)\\/(?:[^\\/]+\\/)?([^\\/?#]+)/)||[])[1]||''),",
+"LS='';try{LS=localStorage.getItem(T+'TierListMakerCode')||''}catch(e){}",
+"R=function(){return [].map.call(document.querySelectorAll('.tier-row'),function(r){",
+"var h=r.querySelector('.label-holder'),l=r.querySelector('.label');",
+"return{label:((l||h||{}).textContent||'').trim(),color:h?getComputedStyle(h).backgroundColor:'',",
+"ids:[].map.call(r.querySelectorAll('.character'),function(c){return c.id})}})",
+".filter(function(x){return x.ids.length||x.label})},",
+"D=function(){return [].map.call(document.querySelectorAll('.character'),function(e,n){",
+"var m=(e.getAttribute('style')||'').match(/url\\(['\"]?(.*?)['\"]?\\)/),i=e.querySelector('img');",
+"return{key:e.id||String(n+1),src:m?m[1]:(i?i.src:''),name:e.title||(i?i.alt:'')||''}}).filter(function(x){return x.src})},",
+"F=function(c){var rows=R();var o=JSON.stringify({tierforge:1,title:document.title,url:L,",
+"chars:c,rows:rows,templateCode:TC||LS});",
+"var msg='TierForge: copied '+c.length+' items'+(rows.length?' and '+rows.length+' tiers':'')+'. Paste it into the Grab tab.';",
+"navigator.clipboard.writeText(o).then(function(){alert(msg)},",
+"function(){var w=window.open();w.document.write('<textarea style=\"width:99%;height:90vh\">'+o+'</textarea>')})};",
+"fetch('/create/'+T).then(function(r){return r.text()}).then(function(h){",
+"var v=(h.match(/initList\\(\\s*\"[^\"]*\"\\s*,\\s*\"[^\"]*\"\\s*,\\s*\"([^\"]*)\"/)||[])[1]||'',",
+"d=(h.match(/dateLastEdited\\s*=\\s*\"([^\"]*)\"/)||[])[1]||'';",
+"return fetch('/api/?type=templates-v2&id='+encodeURIComponent(T)+'&lastEdited='+encodeURIComponent(d)+'&variation='+encodeURIComponent(v))",
+".then(function(r){return r.json()}).then(function(j){return j.slice(1).map(function(e,n){",
+"return{key:String((e&&e.id)||n+1),src:(e&&e.src)||'',name:''}}).filter(function(x){return x.src})})})",
+".then(function(c){F(c.length?c:D())},function(){var c=D();c.length?F(c):alert('TierForge: nothing found on this page')})})()"
+].join(''));
+
+/* JSON in ------------------------------------------------------- */
+$('#btnParseJson').onclick=()=>loadJSON($('#pastejson').value,false);
+$('#btnJsonFile').onclick=()=>$('#jsonfile').click();
+$('#jsonfile').onchange=e=>e.target.files[0]?.text().then(t=>loadJSON(t,false));
+function loadJSON(text,quiet){
+  let o; try{ o=JSON.parse(text); }catch(err){ return toast('Invalid JSON: '+err.message); }
+  snapshot();
+  if(Array.isArray(o)){ // a raw templates-v2 response pasted straight in
+    const chars=parseApiItems(o,'');
+    if(!chars.length) return toast('That array holds no items');
+    buildFrom(chars,null,false,{title:cleanTitle(String(o[0]||''))||'Imported template'});
+    dlgImport.close(); return toast('Imported '+chars.length+' items');
+  }
+  if(o.chars){ // bookmarklet payload
+    // Rows scraped off the live page beat templateCode: they carry the arrangement
+    // actually on screen (remix pages, hand-rearranged pages) and the real colours.
+    const tc = (o.rows&&o.rows.length&&o.rows.some(r=>r.ids&&r.ids.length))
+      ? {tiers:o.rows.map((r,i)=>({label:r.label||String(i+1),
+          color:toHex(r.color)||TM_COLORS[i%10], ids:(r.ids||[]).map(String)}))}
+      : (o.templateCode?parseTemplateCode('templateCode = "'+o.templateCode+'"'):null);
+    buildFrom(o.chars.filter(c=>c.src).map(c=>({...c,name:c.name||nameFromUrl(c.src)})),tc,
+      $('#mergepaste')?.checked||false,{url:o.url,title:cleanTitle(o.title)});
+    dlgImport.close();
+    return toast(`Imported ${o.chars.length} items`+(tc?` into ${tc.tiers.length} tiers`:''));
+  }
+  if(o.items&&o.tiers){ // full board / python pack
+    S=normalize(o); sel.clear(); persist(); render(); dlgImport.close();
+    return toast('Loaded "'+S.title+'"');
+  }
+  toast('Unrecognised JSON shape');
+}
+function normalize(o){
+  const st=blankState(); st.title=o.title||st.title; st.source=o.source||'';
+  if(o.opts)Object.assign(st.opts,o.opts);
+  st.items={}; const map={};
+  const arr=Array.isArray(o.items)?o.items:Object.values(o.items);
+  arr.forEach(it=>{ const id=it.id||uid();
+    st.items[id]={id,name:it.name||nameFromUrl(it.img||''),tags:it.tags||[],
+      notes:it.notes||'',img:it.img||it.src||'',src:it.src||'',tmkey:it.tmkey||it.key||''};
+    map[it.id||'']=id; if(it.key)map[it.key]=id; if(it.tmkey)map[it.tmkey]=id; });
+  st.tiers=(o.tiers||[]).map((t,i)=>({id:uid(),label:t.label??t.name??String(i),
+    color:t.color||TM_COLORS[i%10],
+    items:(t.items||t.ids||[]).map(x=>map[x]||(st.items[x]?x:null)).filter(Boolean)}));
+  if(!st.tiers.length)st.tiers=blankState().tiers;
+  const placed=new Set(st.tiers.flatMap(t=>t.items));
+  st.pool=(o.pool||[]).map(x=>map[x]||x).filter(x=>st.items[x]&&!placed.has(x));
+  Object.keys(st.items).forEach(id=>{ if(!placed.has(id)&&!st.pool.includes(id))st.pool.push(id); });
+  return st;
+}
+
+/* plain text ---------------------------------------------------- */
+$('#btnParseText').onclick=()=>{
+  const lines=$('#pastetext').value.split('\n').map(s=>s.trim()).filter(Boolean);
+  if(!lines.length)return; snapshot();
+  lines.forEach(l=>{ const [name,tags,notes]=l.split('|').map(s=>(s||'').trim());
+    const id=uid(); S.items[id]={id,name,tags:tags?tags.split(',').map(s=>s.trim()).filter(Boolean):[],
+      notes:notes||'',img:'',src:''}; S.pool.push(id); });
+  persist(); render(); toast('Added '+lines.length+' items');
+};
+
+/* ============================ EXPORT ============================ */
+function download(name,blob){ const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob); a.download=name; a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href),5000); }
+const slug=s=>(s||'tierlist').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'');
+
+$('#expJson').onclick=()=>{ const out=JSON.stringify(S,null,1);
+  $('#expout').value=out.length<400000?out:'(too large to preview — file downloaded)';
+  download(slug(S.title)+'.tierforge.json',new Blob([out],{type:'application/json'})); };
+$('#expMd').onclick=()=>{ let s=`# ${S.title}\n\n`;
+  S.tiers.forEach(t=>{ s+=`## ${t.label}\n`;
+    s+=t.items.map(i=>`- ${S.items[i].name}${S.items[i].tags?.length?` _(${S.items[i].tags.join(', ')})_`:''}`
+      +`${S.items[i].notes?` — ${S.items[i].notes}`:''}`).join('\n')||'- _(empty)_'; s+='\n\n'; });
+  if(S.pool.length)s+=`## Unranked\n`+S.pool.map(i=>`- ${S.items[i].name}`).join('\n')+'\n';
+  $('#expout').value=s; };
+$('#expCsv').onclick=()=>{ const q=v=>`"${String(v??'').replace(/"/g,'""')}"`;
+  let s='tier,rank,name,tags,notes,image\n';
+  S.tiers.forEach(t=>t.items.forEach((i,n)=>{ const it=S.items[i];
+    s+=[q(t.label),n+1,q(it.name),q((it.tags||[]).join('; ')),q(it.notes),q(it.img)].join(',')+'\n'; }));
+  S.pool.forEach((i,n)=>{ const it=S.items[i];
+    s+=[q(''),n+1,q(it.name),q((it.tags||[]).join('; ')),q(it.notes),q(it.img)].join(',')+'\n'; });
+  $('#expout').value=s;
+  download(slug(S.title)+'.csv',new Blob([s],{type:'text/csv'})); };
+$('#expCopy').onclick=()=>{ $('#expout').select(); navigator.clipboard.writeText($('#expout').value);
+  toast('Copied'); };
+
+/* ---- back to TierMaker -------------------------------------------------
+   TierMaker's own "clone this list" button does exactly one thing:
+     localStorage.setItem(template + "TierListMakerCode", templateCode)
+   then sends you to /create/<template>?ref=list-remix, which rebuilds the rows
+   from it. So a board that came from a TierMaker template can be pushed back
+   the same way - we just have to regenerate the code and write that key. */
+function templateCodeFor(){
+  const tpl=(S.source.match(/tiermaker\.com\/(?:list\/[^/]+|create)\/([^/?#]+)/i)||[])[1]
+    || Object.values(S.items).map(i=>i.src||'').map(s=>(s.match(/template_images\/[^/]+\/[^/]+\/([^/]+)\//)||[])[1]).find(Boolean);
+  if(!tpl) return null;
+  const rows=S.tiers.map(t=>[t.label.replace(/[|=]/g,' '),tmColorIndex(t.color),
+    ...t.items.map(id=>S.items[id]?.tmkey).filter(Boolean)]);
+  const lost=Object.keys(S.items).filter(id=>!S.items[id].tmkey).length;
+  return {tpl, code:[tpl,...rows.map(r=>r.join('|'))].join('=='), lost,
+    placed:rows.reduce((a,r)=>a+r.length-2,0)};
+}
+$('#expTm').onclick=()=>{
+  const r=templateCodeFor();
+  const el=$('#explog');
+  if(!r){ el.textContent='This board did not come from a TierMaker template, so there is nothing to push back to.';
+    $('#expout').value=''; return; }
+  $('#expout').value=r.code;
+  const url='https://tiermaker.com/create/'+r.tpl+'?ref=list-remix';
+  const push='javascript:'+["(function(){try{localStorage.setItem(",
+    JSON.stringify(r.tpl+'TierListMakerCode'),",",JSON.stringify(r.code),
+    ");location.href=",JSON.stringify(url),
+    "}catch(e){alert('TierForge: could not write to TierMaker storage - '+e)}})()"].join('');
+  el.innerHTML=`Rebuilt TierMaker code for <b>${esc(r.tpl)}</b> — ${r.placed} placed item(s)`
+    +(r.lost?`, ${r.lost} of your own item(s) can't go back (TierMaker only knows its own template)`:'')
+    +`.<br><br>Open <a href="${esc(url)}" target="_blank">${esc(url)}</a> first, then click this
+      once you are on tiermaker.com: <a id="push" style="font-weight:700;padding:2px 8px;
+      background:var(--panel2);border:1px solid var(--line);border-radius:6px">⬆ TierForge push</a>
+      — drag it to your bookmarks bar to reuse it.<br>
+      <small class="muted">It writes the same localStorage key TierMaker's own clone button uses,
+      then reloads the remix page. Tier colours snap to TierMaker's ten stock rows.</small>`;
+  $('#push').setAttribute('href',push);
+};
+
+/* image proxy that returns CORS headers, so canvas stays untainted */
+const isRemote=u=>/^https?:\/\//i.test(u);
+const corsUrl=u=>isRemote(u)
+  ? 'https://images.weserv.nl/?url='+encodeURIComponent(u.replace(/^https?:\/\//,'')) : u;
+function loadImg(src,anon){ return new Promise(res=>{ const i=new Image();
+  // crossOrigin on a file:// or relative src throws "unique security origin" - only set it
+  // when the request really is cross-origin.
+  if(anon) i.crossOrigin='anonymous';
+  i.onload=()=>res(i); i.onerror=()=>res(null); i.src=src; }); }
+async function loadForCanvas(src){                  // proxy first: remote hosts rarely send CORS
+  if(!isRemote(src)) return loadImg(src,false);     // data:, relative, or file:// - load as-is
+  return (await loadImg(corsUrl(src),true)) || (await loadImg(src,true)); }
+
+$('#expEmbed').onclick=()=>embedAll(m=>{ $('#explog').textContent=m; });
+async function embedAll(report=()=>{}){
+  const list=Object.values(S.items).filter(i=>i.img&&isRemote(i.img));
+  if(!list.length){ report('Everything is already embedded.'); return; }
+  let ok=0,fail=0;
+  for(const it of list){
+    report(`Embedding ${ok+fail+1}/${list.length}…`);
+    try{ const r=await fetch(corsUrl(it.img)); if(!r.ok)throw 0;
+      const b=await r.blob();
+      it.img=await new Promise(res=>{ const fr=new FileReader(); fr.onload=()=>res(fr.result); fr.readAsDataURL(b); });
+      ok++; }catch(e){ fail++; }
+  }
+  persist(); render(); report(`Embedded ${ok} image${ok===1?'':'s'}${fail?`, ${fail} failed`:''}.`);
+}
+
+$('#expPng').onclick=async()=>{
+  const el=$('#explog'); el.textContent='Loading images…';
+  const S_=S, size=Math.max(48,S_.opts.size), pad=3, labelw=Math.max(120,size*1.6);
+  const perRow=Math.max(4,Math.round(1400/(size+pad)));
+  const cvs=document.createElement('canvas'), ctx=cvs.getContext('2d');
+  const rows=S_.tiers.map(t=>({...t,lines:Math.max(1,Math.ceil(t.items.length/perRow))}));
+  const width=labelw+perRow*(size+pad)+pad;
+  const height=rows.reduce((a,r)=>a+r.lines*(size+pad)+pad,0)+40;
+  cvs.width=width; cvs.height=height;
+  ctx.fillStyle='#0f1115'; ctx.fillRect(0,0,width,height);
+  ctx.font='bold 20px Segoe UI,sans-serif'; ctx.fillStyle='#e7eaf0'; ctx.textBaseline='middle';
+  ctx.fillText(S_.title,10,20);
+  const cache=new Map(); let y=40, failed=0;
+  for(const r of rows){
+    const h=r.lines*(size+pad)+pad;
+    ctx.fillStyle=r.color; ctx.fillRect(0,y,labelw,h);
+    ctx.fillStyle='#111'; ctx.font='bold 18px Segoe UI,sans-serif';
+    ctx.textAlign='center';
+    wrapText(ctx,r.label,labelw/2,y+h/2,labelw-12,20);
+    ctx.textAlign='left';
+    for(let k=0;k<r.items.length;k++){
+      const it=S_.items[r.items[k]]; if(!it)continue;
+      const x=labelw+pad+(k%perRow)*(size+pad), yy=y+pad+Math.floor(k/perRow)*(size+pad);
+      ctx.fillStyle='#000'; ctx.fillRect(x,yy,size,size);
+      if(it.img){ if(!cache.has(it.img))cache.set(it.img,await loadForCanvas(it.img));
+        const img=cache.get(it.img);
+        if(img){ const s=Math.min(size/img.width,size/img.height);
+          ctx.drawImage(img,x+(size-img.width*s)/2,yy+(size-img.height*s)/2,img.width*s,img.height*s); }
+        else failed++; }
+      if(!it.img||!cache.get(it.img)){ ctx.fillStyle='#e7eaf0'; ctx.font='11px Segoe UI,sans-serif';
+        ctx.textAlign='center'; wrapText(ctx,it.name,x+size/2,yy+size/2,size-6,12); ctx.textAlign='left'; }
+      el.textContent='Drawing…';
+    }
+    y+=h;
+  }
+  try{ cvs.toBlob(b=>{ download(slug(S_.title)+'.png',b);
+    el.textContent=`Done${failed?` — ${failed} image(s) could not be loaded; run "Embed all images" and retry.`:''}`; }); }
+  catch(err){ el.textContent='Canvas is tainted — run "Embed all images" first, then export again.'; }
+};
+function wrapText(ctx,text,x,y,maxw,lh){
+  const words=String(text).split(/\s+/), lines=[]; let cur='';
+  for(const w of words){ const t=cur?cur+' '+w:w;
+    if(ctx.measureText(t).width>maxw&&cur){ lines.push(cur); cur=w; } else cur=t; }
+  if(cur)lines.push(cur);
+  const start=y-(lines.length-1)*lh/2;
+  lines.slice(0,6).forEach((l,i)=>ctx.fillText(l,x,start+i*lh));
+}
+
+/* ============================ BOOT ============================ */
+try{ const saved=localStorage.getItem(LS); S=saved?JSON.parse(saved):blankState(); }
+catch(e){ S=blankState(); }
+if(!S||!S.tiers)S=blankState();
+S.opts=Object.assign({size:96,labels:'find'},S.opts||{});
+render();
+</script>
+</body>
+</html>
