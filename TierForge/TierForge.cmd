@@ -1,11 +1,16 @@
 @echo off
-rem Starts the TierForge helper and opens the app in your browser.
-rem The helper serves the page and does TierMaker imports for it, which is the
-rem only import path that isn't at the mercy of Cloudflare or a public proxy.
+setlocal
+rem Starts TierForge's local Node runtime and opens the app in your browser.
 cd /d "%~dp0"
-python scrape_tiermaker.py --serve %*
+where npm >nul 2>nul
+if errorlevel 1 (
+  echo TierForge needs Node.js 20 or newer. Install it from https://nodejs.org/
+  pause
+  exit /b 1
+)
+call npm run serve -- %*
 if errorlevel 1 (
   echo.
-  echo Could not start. Is Python on your PATH?  Try:  py scrape_tiermaker.py --serve
+  echo TierForge could not start. Run "npm test" in this folder for diagnostics.
   pause
 )

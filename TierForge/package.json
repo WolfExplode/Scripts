@@ -1,0 +1,16 @@
+{
+  "name": "tierforge",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Local-first tier-list builder and importer",
+  "scripts": {
+    "serve": "node src/server.js",
+    "start": "npm run serve",
+    "test": "node --test",
+    "check": "node --check src/server.js && node --check src/importer.js && node --check app.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
