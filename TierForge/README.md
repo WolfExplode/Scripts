@@ -1,6 +1,7 @@
 # TierForge
 
-A tier list maker that is actually searchable, and that can swallow any TierMaker list whole.
+A tier list maker that is actually searchable, that can swallow any TierMaker list whole, and
+that can pull every card straight from the Slay the Spire 2 wiki.
 
 - **`TierForge.cmd`** — start here. Runs the helper and opens the app.
 - **`tierforge.html`** — the whole app. One file, no build, no dependencies.
@@ -43,6 +44,35 @@ Verified against the reference list (`ironclad-cards-slay-the-spire-ii-19230513`
 Tick **Download & embed images** if you want the board to survive TierMaker going away (and to
 make PNG export bulletproof).
 
+### 3. Or grab every Slay the Spire 2 card in one click
+
+**Import → Slay the Spire 2: all cards** reads
+[the wiki's Cards List](https://slaythespire.wiki.gg/wiki/Slay_the_Spire_2:Cards_List) and drops
+all ~600 cards into the pool — name, character, rarity, type and keywords all become searchable
+tags, and the card text becomes its note. Tick **Merge into current board** to add them to a board
+you're already building instead of replacing it.
+
+The wiki's image CDN blocks a page loading ~600 hotlinked images at once, so this import always
+embeds the art as data URLs (fetched one at a time by the helper) rather than linking to wiki.gg —
+which also means the board still works if the wiki is ever unreachable. That's ~600 sequential
+fetches, so it takes tens of seconds; the Import dialog's log panel streams each one
+(`image 42/595 Anger`) as it happens rather than sitting on a spinner, and reports anything that
+failed instead of silently dropping it.
+
+### Already have a board? Relink its images to the wiki instead of re-importing
+
+Next to each detected game's import button is **Relink current items' images to wiki** — for a
+board you already built (say, from a TierMaker template), this fetches that game's wiki data and
+swaps each item's image for the wiki's, matching by name with spacing/punctuation stripped
+(TierMaker's `Ashenstrike` matches the wiki's `Ashen Strike`). Only `img`/`src` change; tags, notes
+and tier placement are untouched, and anything it can't match on the wiki is left exactly as it
+was (reported in the log, not silently skipped).
+
+TierForge tries to guess which game a board is for from its title, falling back to its `source`
+URL (so a board just titled "Ironclad" whose source is `…-slay-the-spire-ii-…` still matches) — the
+detected source is highlighted, but every known source gets its own button regardless, since the
+guess is only ever a convenience.
+
 ## Start it with the helper
 
 ```
@@ -53,8 +83,13 @@ That serves the app at `http://127.0.0.1:8777/tierforge.html` and opens it. The 
 talks to the helper, which does the fetching from your machine — no proxy, no Cloudflare, nothing
 to configure. The app shows **Local helper connected** when it finds it.
 
-You can still open `tierforge.html` by double-clicking it; everything except URL import works
-exactly the same, and the bookmarklet covers import.
+Boards also live as files on disk (`Saved/*.tierforge.json`, next to this script) rather than in
+the browser, so **the helper needs to be running for anything to save or load** — without it the
+app still works for the current session, but nothing persists across a reload.
+
+You can still open `tierforge.html` by double-clicking it; the TierMaker bookmarklet still covers
+import, and the plain-text/JSON-pack/drag-and-drop tabs work the same — but URL import (including
+Slay the Spire 2) and Boards need the helper.
 
 ## Why import needs help
 
@@ -128,18 +163,21 @@ way to know about images you added yourself), and tier colours snap to TierMaker
 python scrape_tiermaker.py https://tiermaker.com/list/video-games/foo-123/456789
 python scrape_tiermaker.py https://tiermaker.com/create/foo-123 -o cards.json --embed
 python scrape_tiermaker.py <url> --images ./pics --tags "slay the spire, ironclad"
+python scrape_tiermaker.py https://slaythespire.wiki.gg/wiki/Slay_the_Spire_2:Cards_List --embed
 ```
 
 | flag | effect |
 |---|---|
-| `-o FILE` | output path (default `<template>.tierforge.json`) |
+| `-o FILE` | output path (default `<template>.tierforge.json`, or `sts2-cards.tierforge.json`) |
 | `--embed` | base64 every image into the JSON — one self-contained file |
 | `--images DIR` | download images to `DIR` and link them relatively |
-| `--tags a,b` | pre-tag every item |
+| `--tags a,b` | pre-tag every item (TierMaker imports only) |
 | `--serve` | run the local helper instead of writing a file |
 | `--port N` | helper port (default 8777) |
 
-Drag the resulting `.json` onto the app window, or use **Import → JSON pack**.
+Drag the resulting `.json` onto the app window, or use **Import → JSON pack**. `--serve` also
+exposes the board storage the app uses: `GET /boards` lists saved boards, and `GET`/`PUT`/`DELETE
+/boards/<name>` reads, writes or removes `Saved/<name>.tierforge.json`.
 
 ## Other things it does
 
@@ -153,8 +191,8 @@ Drag the resulting `.json` onto the app window, or use **Import → JSON pack**.
 - Tiers: rename in place, recolour, reorder, empty, delete.
 - Export to **JSON** (round-trips), **back to TierMaker**, **PNG** (drawn on a canvas; remote images are routed through
   `images.weserv.nl` so the canvas stays untainted), **Markdown**, or **CSV**.
-- Autosaves to `localStorage`; **Boards** keeps several named lists. <kbd>Ctrl</kbd>+<kbd>Z</kbd>
-  undoes the last ~40 structural changes.
+- Autosaves to `Saved/_autosave.tierforge.json`; **Boards** keeps several named lists as files in
+  that same folder. <kbd>Ctrl</kbd>+<kbd>Z</kbd> undoes the last ~40 structural changes.
 
 ## Keys
 
@@ -169,4 +207,5 @@ double-click a tile for the inspector.
   the image hosts.
 - Imported item names come from TierMaker's image filenames (`ashenstrike.png` → "Ashenstrike"),
   since its templates carry no separate labels. Rename anything in the inspector.
-- `localStorage` caps out around 5 MB, so embedded-image boards are best kept as exported JSON.
+- Boards are plain JSON files in `Saved/`, so there's no size cap the way there was with
+  `localStorage` — an embedded-image Slay the Spire 2 board runs to tens of MB and that's fine.

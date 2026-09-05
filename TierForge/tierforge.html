@@ -40,8 +40,12 @@ kbd{background:#2a3040;border:1px solid var(--line);border-bottom-width:2px;bord
   padding:0 5px;font-size:11px;font-family:inherit;color:var(--dim)}
 
 /* ---------- board ---------- */
-main{flex:1;overflow:auto;padding:10px;display:flex;flex-direction:column;gap:14px}
-#board{display:flex;flex-direction:column;gap:var(--gap);border:1px solid var(--line);border-radius:8px;overflow:hidden}
+main{flex:1;overflow:hidden;position:relative}
+main.panning{cursor:grabbing}
+#canvas{padding:10px;display:flex;flex-direction:column;gap:14px;transform-origin:0 0;width:fit-content}
+#board{display:flex;flex-direction:column;gap:var(--gap);min-width:1500px;
+  border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.add-tier{align-self:flex-start;margin:5px 6px 6px;padding:3px 8px;font-size:12px}
 .tier{display:flex;min-height:calc(var(--size) + 8px);background:var(--panel);}
 .tier + .tier{border-top:1px solid var(--line)}
 .tlabel{width:var(--labelw);flex:none;display:flex;flex-direction:column;align-items:center;
@@ -130,7 +134,6 @@ a{color:var(--accent)}
     <input id="title" value="Untitled Tier List" spellcheck="false">
     <div class="sep"></div>
     <button id="btnImport" class="primary">Import ▾</button>
-    <button id="btnAddTier">+ Tier</button>
     <button id="btnExport">Export ▾</button>
     <button id="btnBoards">Boards</button>
     <div class="spacer"></div>
@@ -160,17 +163,19 @@ a{color:var(--accent)}
 </header>
 
 <main>
-  <div id="board"></div>
-  <div id="poolwrap">
-    <div id="poolhead">
-      <strong>Unranked pool</strong>
-      <span id="poolcount" class="muted"></span>
-      <div class="spacer"></div>
-      <button id="btnSortPool" class="ghost">Sort A→Z</button>
-      <button id="btnAddImgs" class="ghost">+ Add images…</button>
-      <input id="fileinput" type="file" accept="image/*" multiple hidden>
+  <div id="canvas">
+    <div id="board"></div>
+    <div id="poolwrap">
+      <div id="poolhead">
+        <strong>Unranked pool</strong>
+        <span id="poolcount" class="muted"></span>
+        <div class="spacer"></div>
+        <button id="btnSortPool" class="ghost">Sort A→Z</button>
+        <button id="btnAddImgs" class="ghost">+ Add images…</button>
+        <input id="fileinput" type="file" accept="image/*" multiple hidden>
+      </div>
+      <div id="pool" class="drop" data-list="pool"></div>
     </div>
-    <div id="pool" class="drop" data-list="pool"></div>
   </div>
 </main>
 
@@ -190,11 +195,12 @@ a{color:var(--accent)}
   <div class="dbody">
     <div class="tabpane on" id="tab-url">
       <div id="helperstate" class="note">Checking for the local helper…</div>
-      <input id="tmurl" placeholder="https://tiermaker.com/list/video-games/…" spellcheck="false">
+      <input id="tmurl" placeholder="https://tiermaker.com/list/video-games/… or a slaythespire.wiki.gg page" spellcheck="false">
       <label class="row" style="gap:6px"><input type="checkbox" id="embedimgs"> Download &amp; embed images as data URLs (offline-safe, enables PNG export — slower)</label>
       <label class="row" style="gap:6px"><input type="checkbox" id="mergeimp"> Merge into current board instead of replacing</label>
       <div class="row"><button id="btnFetch" class="primary">Fetch &amp; import</button>
         <span class="muted" style="font-size:12px">…or use the bookmarklet on the Grab tab — that one can't be blocked.</span></div>
+      <div id="gameSources"></div>
       <div id="log"></div>
     </div>
     <div class="tabpane" id="tab-grab">
@@ -261,8 +267,9 @@ a{color:var(--accent)}
     <div class="row"><input id="boardname" placeholder="Board name" style="flex:1">
       <button id="btnSaveBoard" class="primary">Save current</button></div>
     <div id="boardlist"></div>
-    <div class="note">Boards live in this browser's localStorage for this file. Use
-      <em>Export → Board JSON</em> for anything you want to keep permanently.</div>
+    <div class="note">Boards are saved as files in this folder's <code>Saved/</code> directory by
+      the local helper — not this browser's storage. Requires <code>TierForge.cmd</code> (or
+      <code>python scrape_tiermaker.py --serve</code>) to be running.</div>
   </div>
   <div class="dfoot"><button onclick="dlgBoards.close()">Close</button></div>
 </dialog>
@@ -403,6 +410,9 @@ function render(){
       <div class="drop" data-list="${t.id}"></div>`;
     fillDrop($('.drop',row),t.items); board.appendChild(row);
   });
+  const addTier=document.createElement('button');
+  addTier.id='btnAddTier'; addTier.className='add-tier'; addTier.textContent='+ Add tier';
+  board.appendChild(addTier);
   fillDrop($('#pool'),S.pool);
   $('#poolcount').textContent=`${S.pool.length} item${S.pool.length===1?'':'s'}`;
   const total=Object.keys(S.items).length;
@@ -419,6 +429,7 @@ function flatOrder(){ return [...S.tiers.flatMap(t=>t.items),...S.pool]; }
 
 /* ============================ EVENTS: board ============================ */
 document.addEventListener('click',e=>{
+  if(e.target.closest('#btnAddTier')){ addTier(); return; }
   const tool=e.target.closest('.tools button');
   if(tool){ const tid=tool.closest('.tier').dataset.tier; tierAction(tid,tool.dataset.act); return; }
   const it=e.target.closest('.item');
@@ -511,6 +522,40 @@ function openInsp(id){
     if(ev.key==='Enter'&&el.tagName==='INPUT'){ ev.preventDefault(); $('#i-save').click(); } }));
 }
 
+/* ============================ CANVAS PAN/ZOOM ============================ */
+(()=>{
+  const main=document.querySelector('main'), canvas=$('#canvas');
+  const view={x:0,y:0,scale:1};
+  const MIN=1, MAX=5;
+  function apply(){ canvas.style.transform=`translate(${view.x}px,${view.y}px) scale(${view.scale})`; }
+
+  let dragging=false, lastX=0, lastY=0;
+  main.addEventListener('mousedown',e=>{
+    if(e.button!==1) return;
+    e.preventDefault();
+    dragging=true; lastX=e.clientX; lastY=e.clientY; main.classList.add('panning');
+  });
+  window.addEventListener('mousemove',e=>{
+    if(!dragging) return;
+    view.x+=e.clientX-lastX; view.y+=e.clientY-lastY;
+    lastX=e.clientX; lastY=e.clientY; apply();
+  });
+  window.addEventListener('mouseup',e=>{
+    if(e.button!==1||!dragging) return;
+    dragging=false; main.classList.remove('panning');
+  });
+
+  main.addEventListener('wheel',e=>{
+    e.preventDefault();
+    const rect=main.getBoundingClientRect();
+    const mx=e.clientX-rect.left, my=e.clientY-rect.top;
+    const cx=(mx-view.x)/view.scale, cy=(my-view.y)/view.scale;
+    const factor=Math.pow(1.0015,-e.deltaY);
+    const newScale=Math.min(MAX,Math.max(MIN,view.scale*factor));
+    view.x=mx-cx*newScale; view.y=my-cy*newScale; view.scale=newScale;
+    apply();
+  },{passive:false});
+})();
 /* ============================ TOOLBAR ============================ */
 $('#title').oninput=e=>{ S.title=e.target.value; persist(); };
 $('#q').oninput=applyFilter;
@@ -521,8 +566,8 @@ $('#size').addEventListener('mousedown',e=>{ if(e.button!==1) return; e.preventD
   $('#size').value=96; $('#size').dispatchEvent(new Event('input')); });
 $('#labmode').addEventListener('mousedown',e=>{ if(e.button!==1) return; e.preventDefault();
   $('#labmode').value='find'; $('#labmode').dispatchEvent(new Event('change')); });
-$('#btnAddTier').onclick=()=>{ snapshot();
-  S.tiers.push({id:uid(),label:'New',color:TM_COLORS[S.tiers.length%10],items:[]}); persist(); render(); };
+function addTier(){ snapshot();
+  S.tiers.push({id:uid(),label:'New',color:TM_COLORS[S.tiers.length%10],items:[]}); persist(); render(); }
 $('#btnToPool').onclick=()=>sel.size&&moveItems([...sel],'pool',null);
 $('#btnClearSel').onclick=()=>{ sel.clear(); syncSel(); };
 $('#btnSelHits').onclick=selectHits;
@@ -534,17 +579,21 @@ $('#btnSortPool').onclick=()=>{ snapshot();
 $('#btnAddImgs').onclick=()=>$('#fileinput').click();
 $('#fileinput').onchange=e=>addFiles([...e.target.files]);
 $('#btnHelp').onclick=()=>dlgHelp.showModal();
-$('#btnImport').onclick=async()=>{ dlgImport.showModal(); refreshHelperState(); };
+$('#btnImport').onclick=async()=>{ dlgImport.showModal(); refreshHelperState(); renderGameSources(); };
 async function refreshHelperState(){
   const el=$('#helperstate'); el.textContent='Checking for the local helper…';
   helperBase=await findHelper();
   if(helperBase){ el.innerHTML=`<b style="color:var(--ok)">Local helper connected</b> (${esc(helperBase)}).
     Paste any <code>tiermaker.com/list/…</code> or <code>/create/…</code> link — it fetches and
-    rebuilds tiers, colours, images and placements directly.`; }
+    rebuilds tiers, colours, images and placements directly. The Slay the Spire 2 button below
+    imports every card from the wiki's Cards List straight into the pool. Boards also now save to
+    this folder's <code>Saved/</code> directory instead of the browser.`; }
   else { el.innerHTML=`<b style="color:var(--accent2)">No local helper.</b> TierMaker builds its item
-    list in JavaScript and blocks readers, so public proxies often come back empty. For a reliable
-    import run <code>python scrape_tiermaker.py --serve</code> in this folder and open the page it
-    gives you — or use the bookmarklet on the <b>Grab from page</b> tab. Trying the proxies is still
+    list in JavaScript and blocks readers, and the Slay the Spire 2 wiki blocks plain browser
+    fetches outright, so public proxies often come back empty. For a reliable import — and for
+    boards to save to disk at all — run <code>python scrape_tiermaker.py --serve</code> in this
+    folder (or double-click <code>TierForge.cmd</code>) and open the page it gives you, or use the
+    bookmarklet on the <b>Grab from page</b> tab for TierMaker. Trying the proxies is still
     worth a shot.`; }
 }
 $('#btnExport').onclick=()=>dlgExport.showModal();
@@ -580,28 +629,54 @@ async function addFiles(files){ if(!files.length)return; snapshot();
     S.pool.push(id); }
   persist(); render(); toast(`Added ${files.length} image${files.length===1?'':'s'}`); }
 
-/* ============================ PERSISTENCE ============================ */
-const LS='tierforge.current', LSB='tierforge.boards';
-function persist(){ try{ localStorage.setItem(LS,JSON.stringify(S)); }catch(err){ /* quota */ } }
-function quickSave(){ const name=S.title||'Board'; saveBoard(name); toast('Saved board "'+name+'"'); }
-function boards(){ try{ return JSON.parse(localStorage.getItem(LSB)||'{}'); }catch(e){ return {}; } }
-function saveBoard(name){ const b=boards(); b[name]={at:Date.now(),data:JSON.stringify(S)};
-  try{ localStorage.setItem(LSB,JSON.stringify(b)); }
-  catch(e){ toast('localStorage full — use Export → Board JSON'); } }
-function renderBoards(){ const b=boards(), wrap=$('#boardlist'); $('#boardname').value=S.title;
-  const names=Object.keys(b).sort();
-  wrap.innerHTML=names.length?names.map(n=>`<div class="row" style="padding:4px 0;border-bottom:1px solid var(--line)">
-      <span style="flex:1">${esc(n)}</span>
-      <small>${new Date(b[n].at).toLocaleString()}</small>
-      <button data-load="${esc(n)}">Load</button><button class="danger" data-drop="${esc(n)}">✕</button></div>`).join('')
-    :'<div class="muted">No saved boards yet.</div>';
-  $$('button[data-load]',wrap).forEach(x=>x.onclick=()=>{ snapshot(); S=JSON.parse(b[x.dataset.load].data);
-    sel.clear(); persist(); render(); dlgBoards.close(); });
-  $$('button[data-drop]',wrap).forEach(x=>x.onclick=()=>{ const bb=boards(); delete bb[x.dataset.drop];
-    localStorage.setItem(LSB,JSON.stringify(bb)); renderBoards(); });
+/* ============================ PERSISTENCE ============================
+   Boards are JSON files in this folder's Saved/ directory, read and written
+   by the local helper (scrape_tiermaker.py --serve / TierForge.cmd) — not
+   the browser's localStorage. Without the helper running, nothing persists
+   between reloads; warnNoHelper() says so once. */
+const AUTOSAVE='_autosave';
+let saveTimer=null, warnedNoHelper=false;
+function persist(){
+  if(!helperBase){ warnNoHelper(); return; }
+  clearTimeout(saveTimer);
+  saveTimer=setTimeout(()=>{
+    fetch(helperBase+'/boards/'+encodeURIComponent(AUTOSAVE),{method:'PUT',body:JSON.stringify(S)})
+      .catch(()=>{});
+  },400);
 }
-$('#btnSaveBoard').onclick=()=>{ const n=$('#boardname').value.trim()||'Board';
-  S.title=n; saveBoard(n); renderBoards(); toast('Saved'); };
+function warnNoHelper(){ if(warnedNoHelper)return; warnedNoHelper=true;
+  toast('No local helper running — nothing is being saved. Run TierForge.cmd, then reload.'); }
+function quickSave(){ const name=S.title||'Board';
+  saveBoard(name).then(ok=>toast(ok?'Saved board "'+name+'"':'Not saved — no local helper running')); }
+async function saveBoard(name){
+  if(!helperBase){ warnNoHelper(); return false; }
+  try{ const r=await fetch(helperBase+'/boards/'+encodeURIComponent(name),
+    {method:'PUT',body:JSON.stringify(S)}); return r.ok; }
+  catch(e){ return false; }
+}
+async function renderBoards(){
+  const wrap=$('#boardlist'); $('#boardname').value=S.title;
+  if(!helperBase){ wrap.innerHTML=`<div class="muted">No local helper running — boards can't be
+    saved or loaded from disk. Run <code>TierForge.cmd</code> (or
+    <code>python scrape_tiermaker.py --serve</code>) from the TierForge folder, then reload this
+    page.</div>`; return; }
+  let list=[];
+  try{ list=(await (await fetch(helperBase+'/boards')).json()).boards||[]; }catch(e){}
+  wrap.innerHTML=list.length?list.map(b=>`<div class="row" style="padding:4px 0;border-bottom:1px solid var(--line)">
+      <span style="flex:1">${esc(b.name)}</span>
+      <small>${new Date(b.mtime).toLocaleString()}</small>
+      <button data-load="${esc(b.name)}">Load</button><button class="danger" data-drop="${esc(b.name)}">✕</button></div>`).join('')
+    :'<div class="muted">No saved boards yet.</div>';
+  $$('button[data-load]',wrap).forEach(x=>x.onclick=async()=>{
+    const r=await fetch(helperBase+'/boards/'+encodeURIComponent(x.dataset.load));
+    if(!r.ok)return toast('Could not load that board');
+    snapshot(); S=JSON.parse(await r.text()); sel.clear(); persist(); render(); dlgBoards.close(); });
+  $$('button[data-drop]',wrap).forEach(x=>x.onclick=async()=>{
+    await fetch(helperBase+'/boards/'+encodeURIComponent(x.dataset.drop),{method:'DELETE'});
+    renderBoards(); });
+}
+$('#btnSaveBoard').onclick=async()=>{ const n=$('#boardname').value.trim()||'Board';
+  S.title=n; const ok=await saveBoard(n); renderBoards(); toast(ok?'Saved':'Not saved — no local helper running'); };
 
 /* ============================ TIERMAKER IMPORT ============================
 
@@ -628,13 +703,28 @@ async function findHelper(){
   }
   return null;
 }
-async function importViaHelper(base,url,embed){
-  const q=base+'/import?url='+encodeURIComponent(url)+(embed?'&embed=1':'');
-  const r=await fetch(q);
-  const t=await r.text();
-  let j; try{ j=JSON.parse(t); }catch(e){ throw new Error('helper sent non-JSON'); }
-  if(!r.ok||j.error) throw new Error(j.error||('HTTP '+r.status));
-  return j;
+/** Runs an import on the helper as a background job and polls it for progress,
+ * handing each new log line to onLine as it arrives (default: the Import
+ * dialog's own #log panel) — a plain TierMaker template finishes in a couple
+ * of polls, but ~600 embedded wiki images take tens of seconds, and this is
+ * what lets you watch it go image by image instead of staring at a spinner. */
+async function importViaHelper(base,url,embed,onLine=log){
+  const startRes=await fetch(base+'/import/start?'+new URLSearchParams({url,...(embed?{embed:'1'}:{})}));
+  const start=await startRes.json().catch(()=>({}));
+  if(!startRes.ok||start.error) throw new Error(start.error||('HTTP '+startRes.status));
+  let since=0;
+  for(;;){
+    await new Promise(r=>setTimeout(r,350));
+    const r=await fetch(base+'/import/poll?job='+encodeURIComponent(start.job)+'&since='+since);
+    const j=await r.json().catch(()=>null);
+    if(!r.ok||!j) throw new Error('helper sent a bad response');
+    (j.lines||[]).forEach(onLine);
+    since=j.total??since;
+    if(j.done){
+      if(j.error) throw new Error(j.error);
+      return j.result;
+    }
+  }
 }
 
 const PROXIES=[
@@ -761,13 +851,110 @@ function parseApiItems(data,html){
   }).filter(Boolean);
 }
 
+/** Merge a helper pack's items into the current pool without touching tiers,
+ * for sources (like the STS2 wiki) that carry no tier arrangement of their own. */
+function mergeItemsIntoPool(pack){
+  const arr=Array.isArray(pack.items)?pack.items:Object.values(pack.items);
+  let added=0;
+  arr.forEach(it=>{
+    const img=it.img||it.src||'';
+    if(img && Object.values(S.items).some(i=>i.img===img||i.src===img)) return;
+    const id=uid();
+    S.items[id]={id,name:it.name||nameFromUrl(img),tags:it.tags||[],notes:it.notes||'',img,src:it.src||img};
+    S.pool.push(id); added++;
+  });
+  return added;
+}
+
+/* ============================ GAME WIKI SOURCES ============================
+   A small, extensible table of "this game's whole card/character list lives at
+   this wiki page" sources. The right one is suggested by matching the board's
+   title, but detection is only ever a convenience — every source also gets an
+   explicit button, so nothing requires the guess to land. Add more games here
+   as they come up; each needs its own scraper wired into the helper's /import. */
+const GAME_SOURCES=[
+  {id:'sts2', name:'Slay the Spire 2',
+   match:/\bslay the spire (?:2|ii|two)\b|\bsts ?2\b/,
+   wiki:'https://slaythespire.wiki.gg/wiki/Slay_the_Spire_2:Cards_List'},
+];
+const normName=s=>String(s||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+/** Board title first ("Slay the Spire 2 tier list"), falling back to where it
+ * came from — a TierMaker board's title is often just the character name
+ * ("Ironclad"), but its source URL says "…-slay-the-spire-ii-…". Punctuation
+ * is normalized to spaces so "-ii-" and "II" both read as "ii". */
+function detectGameSource(board){
+  const hay=[board?.title,board?.source].filter(Boolean).join(' ')
+    .toLowerCase().replace(/[^a-z0-9]+/g,' ');
+  return GAME_SOURCES.find(g=>g.match.test(hay))||null;
+}
+
+function renderGameSources(){
+  const wrap=$('#gameSources'); if(!wrap)return;
+  const detected=detectGameSource(S);
+  wrap.innerHTML=GAME_SOURCES.map(g=>`
+    <div class="row" style="gap:6px;margin-top:2px">
+      <button data-imp="${g.id}" class="${g===detected?'primary':'ghost'}">${esc(g.name)}: import all cards</button>
+      <button data-relink="${g.id}" class="ghost">Relink current items' images to wiki</button>
+      ${g===detected?'<span class="muted" style="font-size:12px">↩ detected from the board title</span>':''}
+    </div>`).join('');
+  $$('button[data-imp]',wrap).forEach(b=>b.onclick=()=>quickWikiImport(GAME_SOURCES.find(g=>g.id===b.dataset.imp)));
+  $$('button[data-relink]',wrap).forEach(b=>b.onclick=()=>relinkFromWiki(GAME_SOURCES.find(g=>g.id===b.dataset.relink)));
+}
+
+function quickWikiImport(src){
+  $('#tmurl').value=src.wiki;
+  /* wiki CDNs tend to block a page loading hundreds of hotlinked images at once,
+     so embed them (fetched one at a time by the helper) instead of linking out */
+  $('#embedimgs').checked=true;
+  $('#btnFetch').click();
+}
+
+/** Swap the current board's item images for the wiki's, matching by name with
+ * punctuation/spacing stripped (TierMaker's "Ashenstrike" == wiki's "Ashen
+ * Strike"). Only touches img/src on a match; unmatched items keep whatever
+ * they had, and nothing about tags, notes or placement changes. */
+async function relinkFromWiki(src){
+  if(helperBase===null) helperBase=await findHelper();
+  if(!helperBase) return toast('Needs the local helper — run TierForge.cmd, then reload.');
+  $('#log').textContent='';
+  toast('Fetching '+src.name+' data from the wiki…');
+  let pack;
+  try{ pack=await importViaHelper(helperBase,src.wiki,true); }
+  catch(e){ return toast('Could not fetch the wiki: '+e.message); }
+  const byName={};
+  (Array.isArray(pack.items)?pack.items:Object.values(pack.items)).forEach(it=>{ byName[normName(it.name)]=it; });
+  snapshot();
+  let matched=0; const missed=[];
+  Object.values(S.items).forEach(it=>{
+    const w=byName[normName(it.name)];
+    if(w){ it.img=w.img||w.src||it.img; it.src=w.src||w.img||it.src; matched++; }
+    else missed.push(it.name);
+  });
+  persist(); render();
+  toast(`Relinked ${matched} item(s) to the wiki`+(missed.length?`, ${missed.length} not found (kept as-is)`:''));
+  if(missed.length) log('Not found on the wiki, left unchanged: '+missed.join(', '));
+}
+
 $('#btnFetch').onclick=async()=>{
   const raw=$('#tmurl').value.trim(); if(!raw)return toast('Paste a URL first');
   $('#log').textContent=''; const btn=$('#btnFetch'); btn.disabled=true;
   const url=raw.split('#')[0].replace(/^http:/,'https:');
   try{
+    if(/slaythespire\.wiki\.gg\//i.test(url)){
+      if(helperBase===null) helperBase=await findHelper();
+      if(!helperBase) throw new Error('This needs the local helper — run TierForge.cmd from the '
+        +'TierForge folder, then reload this page. The wiki blocks plain browser fetches.');
+      log('Using local helper at '+helperBase+' …');
+      const pack=await importViaHelper(helperBase,url,$('#embedimgs').checked);
+      if($('#mergeimp').checked){ snapshot(); const added=mergeItemsIntoPool(pack);
+        log(`Merged ${added} new card(s) into the pool (${pack.items.length-added} already present).`); }
+      else { S=normalize(pack); log(`Imported ${pack.items.length} cards.`); }
+      sel.clear(); persist(); render();
+      return toast('Imported '+pack.items.length+' cards');
+    }
+
     if(!/tiermaker\.com\/(list|create)\//i.test(url))
-      throw new Error('Not a tiermaker.com /list/ or /create/ URL');
+      throw new Error('Not a tiermaker.com /list/ or /create/ URL, or a slaythespire.wiki.gg page');
     if(/[?&]ref=list-remix/i.test(raw)){
       log('Note: a ?ref=list-remix link carries no list id — TierMaker keeps the');
       log('cloned arrangement in your browser\'s localStorage, so nothing outside');
@@ -1086,11 +1273,18 @@ function wrapText(ctx,text,x,y,maxw,lh){
 }
 
 /* ============================ BOOT ============================ */
-try{ const saved=localStorage.getItem(LS); S=saved?JSON.parse(saved):blankState(); }
-catch(e){ S=blankState(); }
-if(!S||!S.tiers)S=blankState();
-S.opts=Object.assign({size:96,labels:'find'},S.opts||{});
-render();
+(async()=>{
+  helperBase=await findHelper();
+  if(helperBase){
+    try{ const r=await fetch(helperBase+'/boards/'+encodeURIComponent(AUTOSAVE));
+      if(r.ok) S=JSON.parse(await r.text()); }
+    catch(e){}
+  }
+  if(!S||!S.tiers)S=blankState();
+  S.opts=Object.assign({size:96,labels:'find'},S.opts||{});
+  render();
+  if(!helperBase) warnNoHelper();
+})();
 </script>
 </body>
 </html>
